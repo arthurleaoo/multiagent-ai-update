@@ -1,0 +1,7 @@
+# Arquivos de ambiente e logs
+.env
+*.log
+
+# Cache do Python e virtual environment
+__pycache__/
+.venv/
