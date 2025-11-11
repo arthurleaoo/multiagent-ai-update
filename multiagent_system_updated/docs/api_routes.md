@@ -158,6 +158,9 @@ curl -X POST http://127.0.0.1:5000/generate \
   "task": "Descreva a tarefa a ser realizada.",
   "language": "Python",                 // opcional (padrão: "Python")
   "agents": ["front", "back", "qa"]   // opcional, válido: front|back|qa
+  "preset": "flask",                   // opcional: flask|express|spring
+  "project_name": "projeto",           // opcional: nome do artefato
+  "group_id": "com.example.demo"       // opcional (Spring Boot)
 }
 ```
 - Respostas:
@@ -172,6 +175,9 @@ curl -X POST http://127.0.0.1:5000/generate_zip \
   -d '{
         "task":"Crie uma tela de login com validação.",
         "language":"Python",
-        "agents":["front","back","qa"]
+        "agents":["front","back","qa"],
+        "preset":"spring",
+        "project_name":"projeto",
+        "group_id":"com.example.demo"
       }' --output projeto.zip
 ```

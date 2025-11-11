@@ -8,7 +8,7 @@ load_dotenv()
 
 from src.core.orchestrator import Orchestrator, DB_PATH
 from src.core.auth import hash_password, verify_password, create_token, verify_token
-from src.core.packager import build_project_zip
+from src.core.packager import build_project_zip, build_structured_zip
 import sqlite3
 
 HOST = os.getenv("FLASK_HOST", "127.0.0.1")
@@ -134,6 +134,9 @@ def generate():
     agents_to_run = data.get("agents", ["front", "back", "qa"])
     if not isinstance(agents_to_run, list):
         agents_to_run = ["front", "back", "qa"]
+    preset = data.get("preset")  # opcional: flask|express|spring
+    project_name = data.get("project_name", "projeto")
+    group_id = data.get("group_id", "com.example.demo")
 
     if not task:
         return jsonify({"error":"Campo 'task' é obrigatório"}), 400
@@ -158,6 +161,7 @@ def index_page():
 
 
 @app.route("/generate_zip", methods=["POST"])
+@app.route("/generate_zip/", methods=["POST"])  # aceita barra final
 def generate_zip():
     # Autenticação obrigatória
     uid = get_bearer_user_id()
@@ -170,12 +174,26 @@ def generate_zip():
     agents_to_run = data.get("agents", ["front", "back", "qa"])
     if not isinstance(agents_to_run, list):
         agents_to_run = ["front", "back", "qa"]
+    # NOVO: parâmetros para projeto estruturado
+    preset = data.get("preset")  # opcional: flask|express|spring
+    project_name = data.get("project_name", "projeto")
+    group_id = data.get("group_id", "com.example.demo")
 
     if not task:
         return jsonify({"error":"Campo 'task' é obrigatório"}), 400
     try:
         result = get_orch().run_all(task, language, agents_to_run, user_id=uid)
-        memzip = build_project_zip(task=result["task"], language=result["language"], front=result.get("front", ""), back=result.get("back", ""), qa=result.get("qa", ""))
+        if preset:
+            memzip = build_structured_zip(
+                task=result["task"], language=result["language"],
+                front=result.get("front", ""), back=result.get("back", ""), qa=result.get("qa", ""),
+                preset=preset, project_name=project_name, group_id=group_id
+            )
+        else:
+            memzip = build_project_zip(
+                task=result["task"], language=result["language"],
+                front=result.get("front", ""), back=result.get("back", ""), qa=result.get("qa", "")
+            )
         return send_file(memzip, mimetype="application/zip", as_attachment=True, download_name="projeto.zip")
     except Exception as e:
         return jsonify({"error": str(e)}), 500

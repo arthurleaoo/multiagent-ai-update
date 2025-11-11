@@ -88,6 +88,15 @@
           <label class="chip"><input type="checkbox" id="aQa" checked /> qa</label>
         </div>
       </div>
+      <div>
+        <label>Preset (opcional)</label>
+        <select id="preset">
+          <option value="">(nenhum)</option>
+          <option value="flask">flask</option>
+          <option value="express">express</option>
+          <option value="spring">spring</option>
+        </select>
+      </div>
     </div>
     <div style="margin-top:10px; display:flex; gap:8px; align-items:center;">
       <button onclick="generateZip()">Gerar e baixar ZIP</button>
@@ -207,6 +216,7 @@
       if (document.getElementById('aFront').checked) agents.push('front');
       if (document.getElementById('aBack').checked) agents.push('back');
       if (document.getElementById('aQa').checked) agents.push('qa');
+      const preset = document.getElementById('preset').value;
 
       try {
         const r = await fetch(apiBase + '/generate_zip', {
@@ -215,7 +225,7 @@
             'Authorization': 'Bearer ' + token,
             'Content-Type': 'application/json'
           },
-          body: JSON.stringify({ task, language, agents })
+          body: JSON.stringify({ task, language, agents, preset })
         });
 
         if (!r.ok) {
