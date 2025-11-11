@@ -13,7 +13,7 @@ def ensure_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    # Tabela base (compatível com o código atual)
+    # Tabela base
     cur.execute("""CREATE TABLE IF NOT EXISTS history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         task TEXT NOT NULL,
@@ -24,7 +24,7 @@ def ensure_db():
         created_at TEXT NOT NULL
     )""")
 
-    # Aplica schema estendido (tabelas normalizadas, índices, triggers e view)
+    # Aplica schema estendido
     try:
         schema_path = os.path.join(os.path.dirname(__file__), "schema.sql")
         if os.path.exists(schema_path):

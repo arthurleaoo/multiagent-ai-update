@@ -1,6 +1,5 @@
 PRAGMA foreign_keys = ON;
 
--- Tabela legada/compatível com o código atual
 CREATE TABLE IF NOT EXISTS history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task TEXT NOT NULL,
@@ -79,7 +78,7 @@ WHERE h.qa_response IS NOT NULL AND length(h.qa_response) > 0
     SELECT 1 FROM agent_runs ar WHERE ar.history_id = h.id AND ar.agent_type = 'qa'
   );
 
--- View opcional para obter timestamps das últimas respostas por agente
+
 CREATE VIEW IF NOT EXISTS v_history_latest AS
 SELECT
   h.id,
