@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Teste Multiagent – Auth & ZIP</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Open Sans", "Helvetica Neue", sans-serif; margin: 24px; background: #f7f7f9; }
+    h1 { margin: 0 0 12px; }
+    section { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    label { display: block; font-size: 14px; margin-bottom: 6px; }
+    input[type="text"], input[type="password"], textarea { width: 100%; padding: 8px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px; }
+    button { background: #2563eb; color: white; border: none; border-radius: 6px; padding: 8px 12px; cursor: pointer; font-size: 14px; }
+    button:hover { background: #1d4ed8; }
+    .row { display: flex; gap: 12px; }
+    .row > div { flex: 1; }
+    .token { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; background: #0b1020; color: #9ad; border-radius: 6px; padding: 8px; margin-top: 8px; word-break: break-all; }
+    .status { font-size: 13px; color: #374151; margin-top: 8px; }
+    .error { color: #b91c1c; }
+    .success { color: #065f46; }
+    .chip { display:inline-block; border:1px solid #94a3b8; border-radius: 999px; padding: 4px 10px; margin-right: 6px; background:#f1f5f9; }
+  </style>
+</head>
+<body>
+  <h1>Teste de Autenticação e Geração de ZIP</h1>
+  <p>Use esta página para registrar, fazer login, checar <code>/auth/me</code> e baixar o ZIP de <code>/generate_zip</code>.</p>
+
+  <section>
+    <h2>1) Registro</h2>
+    <div class="row">
+      <div>
+        <label>Email</label>
+        <input id="regEmail" type="text" placeholder="user@example.com" />
+      </div>
+      <div>
+        <label>Senha</label>
+        <input id="regPassword" type="password" placeholder="senha123" />
+      </div>
+    </div>
+    <div style="margin-top:10px; display:flex; gap:8px;">
+      <button onclick="register()">Registrar</button>
+      <span id="regStatus" class="status"></span>
+    </div>
+  </section>
+
+  <section>
+    <h2>2) Login</h2>
+    <div class="row">
+      <div>
+        <label>Email</label>
+        <input id="loginEmail" type="text" placeholder="user@example.com" />
+      </div>
+      <div>
+        <label>Senha</label>
+        <input id="loginPassword" type="password" placeholder="senha123" />
+      </div>
+    </div>
+    <div style="margin-top:10px; display:flex; gap:8px;">
+      <button onclick="login()">Login</button>
+      <span id="loginStatus" class="status"></span>
+    </div>
+    <div class="token" id="tokenBox" style="display:none;"></div>
+  </section>
+
+  <section>
+    <h2>3) Perfil (/auth/me)</h2>
+    <div style="display:flex; gap:8px; align-items:center;">
+      <button onclick="authMe()">Consultar Perfil</button>
+      <span id="meStatus" class="status"></span>
+    </div>
+    <pre id="meResult" style="background:#0b1020; color:#9ad; padding:10px; border-radius:6px; overflow:auto; max-height:180px; margin-top:8px;"></pre>
+  </section>
+
+  <section>
+    <h2>4) Gerar ZIP (/generate_zip)</h2>
+    <label>Tarefa</label>
+    <textarea id="task" rows="3" placeholder="Crie uma tela de login com validação."></textarea>
+    <div class="row" style="margin-top:8px;">
+      <div>
+        <label>Language (opcional)</label>
+        <input id="language" type="text" value="Python" />
+      </div>
+      <div>
+        <label>Agentes</label>
+        <div>
+          <label class="chip"><input type="checkbox" id="aFront" checked /> front</label>
+          <label class="chip"><input type="checkbox" id="aBack" checked /> back</label>
+          <label class="chip"><input type="checkbox" id="aQa" checked /> qa</label>
+        </div>
+      </div>
+    </div>
+    <div style="margin-top:10px; display:flex; gap:8px; align-items:center;">
+      <button onclick="generateZip()">Gerar e baixar ZIP</button>
+      <span id="zipStatus" class="status"></span>
+    </div>
+  </section>
+
+  <section>
+    <h2>Token atual</h2>
+    <div id="tokenCurrent" class="token">(nenhum)</div>
+    <div style="margin-top:8px;">
+      <button onclick="clearToken()">Limpar token</button>
+    </div>
+  </section>
+
+  <script>
+    const apiBase = window.location.origin;
+
+    function setStatus(id, msg, ok=false) {
+      const el = document.getElementById(id);
+      el.textContent = msg;
+      el.className = 'status ' + (ok ? 'success' : 'error');
+    }
+
+    function getToken() {
+      return localStorage.getItem('token') || '';
+    }
+
+    function showToken() {
+      const t = getToken();
+      const box = document.getElementById('tokenBox');
+      const cur = document.getElementById('tokenCurrent');
+      if (t) {
+        box.style.display = 'block';
+        box.textContent = t;
+        cur.textContent = t;
+      } else {
+        box.style.display = 'none';
+        box.textContent = '';
+        cur.textContent = '(nenhum)';
+      }
+    }
+
+    function clearToken() {
+      localStorage.removeItem('token');
+      showToken();
+      setStatus('loginStatus', 'Token limpo.', true);
+    }
+
+    async function register() {
+      setStatus('regStatus', 'Registrando...');
+      const email = document.getElementById('regEmail').value.trim();
+      const password = document.getElementById('regPassword').value.trim();
+      try {
+        const r = await fetch(apiBase + '/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password })
+        });
+        const j = await r.json();
+        if (r.ok) {
+          setStatus('regStatus', 'Registrado com sucesso.', true);
+        } else {
+          setStatus('regStatus', j.error || 'Erro ao registrar');
+        }
+      } catch (e) {
+        setStatus('regStatus', e.message || 'Erro de rede');
+      }
+    }
+
+    async function login() {
+      setStatus('loginStatus', 'Autenticando...');
+      const email = document.getElementById('loginEmail').value.trim();
+      const password = document.getElementById('loginPassword').value.trim();
+      try {
+        const r = await fetch(apiBase + '/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password })
+        });
+        const j = await r.json();
+        if (r.ok && j.token) {
+          localStorage.setItem('token', j.token);
+          showToken();
+          setStatus('loginStatus', 'Login OK, token armazenado.', true);
+        } else {
+          setStatus('loginStatus', j.error || 'Login falhou');
+        }
+      } catch (e) {
+        setStatus('loginStatus', e.message || 'Erro de rede');
+      }
+    }
+
+    async function authMe() {
+      setStatus('meStatus', 'Consultando perfil...');
+      const token = getToken();
+      if (!token) { setStatus('meStatus', 'Sem token. Faça login.'); return; }
+      try {
+        const r = await fetch(apiBase + '/auth/me', {
+          headers: { 'Authorization': 'Bearer ' + token }
+        });
+        const text = await r.text();
+        document.getElementById('meResult').textContent = text;
+        setStatus('meStatus', r.ok ? 'OK' : 'Erro');
+      } catch (e) {
+        setStatus('meStatus', e.message || 'Erro de rede');
+      }
+    }
+
+    async function generateZip() {
+      setStatus('zipStatus', 'Gerando ZIP...');
+      const token = getToken();
+      if (!token) { setStatus('zipStatus', 'Sem token. Faça login.'); return; }
+      const task = document.getElementById('task').value.trim();
+      const language = document.getElementById('language').value.trim() || 'Python';
+      const agents = [];
+      if (document.getElementById('aFront').checked) agents.push('front');
+      if (document.getElementById('aBack').checked) agents.push('back');
+      if (document.getElementById('aQa').checked) agents.push('qa');
+
+      try {
+        const r = await fetch(apiBase + '/generate_zip', {
+          method: 'POST',
+          headers: {
+            'Authorization': 'Bearer ' + token,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ task, language, agents })
+        });
+
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({ error: 'Erro ao gerar ZIP' }));
+          setStatus('zipStatus', err.error || 'Erro ao gerar ZIP');
+          return;
+        }
+
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'projeto.zip';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        setStatus('zipStatus', 'ZIP baixado.', true);
+      } catch (e) {
+        setStatus('zipStatus', e.message || 'Erro de rede');
+      }
+    }
+
+    // init
+    showToken();
+  </script>
+</body>
+</html>

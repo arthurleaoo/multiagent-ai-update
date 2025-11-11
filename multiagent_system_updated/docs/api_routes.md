@@ -144,3 +144,34 @@ curl -X POST http://127.0.0.1:5000/generate \
 - Tokens: validade padrão de 7 dias (`TOKEN_MAX_AGE` pode ajustar).
 - Persistência: cada execução de `/generate` é gravada em `history` e associada ao `user_id` quando autenticada.
 - Erros: respostas de erro incluem `{ "error": "..." }` com HTTP status apropriado.
+
+---
+
+## `POST /generate_zip`
+- Requer autenticação.
+- Headers:
+  - `Authorization: Bearer <token>`
+  - `Content-Type: application/json`
+- Body (JSON):
+```
+{
+  "task": "Descreva a tarefa a ser realizada.",
+  "language": "Python",                 // opcional (padrão: "Python")
+  "agents": ["front", "back", "qa"]   // opcional, válido: front|back|qa
+}
+```
+- Respostas:
+  - 200: retorna `application/zip` (attachment: `projeto.zip`).
+  - 400/401/500 conforme erros.
+
+Exemplo (Insomnia/cURL):
+```
+curl -X POST http://127.0.0.1:5000/generate_zip \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "task":"Crie uma tela de login com validação.",
+        "language":"Python",
+        "agents":["front","back","qa"]
+      }' --output projeto.zip
+```
