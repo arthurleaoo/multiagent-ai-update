@@ -13,18 +13,44 @@ def ensure_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    # Tabela base
-    cur.execute("""CREATE TABLE IF NOT EXISTS history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        task TEXT NOT NULL,
-        language TEXT,
-        front_response TEXT,
-        back_response TEXT,
-        qa_response TEXT,
-        created_at TEXT NOT NULL
-    )""")
 
-    # Aplica schema estendido
+    # Tabela base de histórico
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task TEXT NOT NULL,
+            language TEXT,
+            front_response TEXT,
+            back_response TEXT,
+            qa_response TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+
+    # Tabela de usuários (autenticação)
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+
+    # Migração leve: adiciona coluna user_id em history, se não existir
+    try:
+        cur.execute("PRAGMA table_info(history)")
+        cols = [row[1] for row in cur.fetchall()]
+        if "user_id" not in cols:
+            cur.execute("ALTER TABLE history ADD COLUMN user_id INTEGER")
+    except Exception as e:
+        print(f"[DB] Aviso: não foi possível verificar/adicionar coluna user_id: {e}")
+
+    # Aplica schema estendido de apoio (índices, views, triggers, etc.)
     try:
         schema_path = os.path.join(os.path.dirname(__file__), "schema.sql")
         if os.path.exists(schema_path):
@@ -33,7 +59,6 @@ def ensure_db():
             cur.executescript(sql)
     except Exception as e:
         # Não interrompe a inicialização se houver falha ao aplicar o schema
-        # (mantém funcionamento mínimo)
         print(f"[DB] Aviso: falha ao aplicar schema.sql: {e}")
 
     conn.commit()
@@ -47,7 +72,7 @@ class Orchestrator:
         self.qa = QAAgent()
 
     # 💡 MODIFICAÇÃO CHAVE: Adiciona 'agents_to_run'
-    def run_all(self, task: str, language: str = "Python", agents_to_run: list = ["front", "back", "qa"]) -> dict:
+    def run_all(self, task: str, language: str = "Python", agents_to_run: list = ["front", "back", "qa"], user_id: int | None = None) -> dict:
         
         # Inicializa todas as saídas como vazias
         front_out = ""
@@ -90,11 +115,25 @@ class Orchestrator:
         # persist
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
-        # Persiste todas as saídas, mesmo as que estão vazias
-        cur.execute("INSERT INTO history (task, language, front_response, back_response, qa_response, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                    (task, language, front_out, back_out, qa_out, datetime.utcnow().isoformat()))
-        conn.commit()
-        conn.close()
+        # Persiste todas as saídas, incluindo associação opcional ao usuário
+        # Detecta dinamicamente se a coluna user_id existe
+        try:
+            cur.execute("PRAGMA table_info(history)")
+            cols = [row[1] for row in cur.fetchall()]
+            created_at = datetime.utcnow().isoformat()
+            if "user_id" in cols:
+                cur.execute(
+                    "INSERT INTO history (task, language, front_response, back_response, qa_response, created_at, user_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (task, language, front_out, back_out, qa_out, created_at, user_id)
+                )
+            else:
+                cur.execute(
+                    "INSERT INTO history (task, language, front_response, back_response, qa_response, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (task, language, front_out, back_out, qa_out, created_at)
+                )
+            conn.commit()
+        finally:
+            conn.close()
         
         print(f"\n✅ ORQUESTRADOR: Tarefa '{task}' finalizada com sucesso. Retornando resposta ao cliente.") # NOVO
 
