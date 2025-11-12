@@ -113,7 +113,31 @@
   </section>
 
   <script>
-    const apiBase = window.location.origin;
+    function resolveApiBase() {
+      try {
+        const qp = new URLSearchParams(window.location.search);
+        const override = qp.get('api');
+        if (override) return override;
+        const origin = window.location.origin;
+        if (origin && /^https?:\/\//i.test(origin)) return origin;
+        // Fallback para quando a página é aberta via file:// ou outro esquema
+        return 'http://127.0.0.1:5000';
+      } catch (e) {
+        return 'http://127.0.0.1:5000';
+      }
+    }
+    const apiBase = resolveApiBase();
+
+    async function safeJson(response) {
+      const ct = (response.headers.get('content-type') || '').toLowerCase();
+      const bodyText = await response.text();
+      if (!ct.includes('application/json')) {
+        // Retorna texto cru para depuração; evita erro Unexpected end of JSON input
+        return { _raw: bodyText };
+      }
+      if (!bodyText) return null;
+      try { return JSON.parse(bodyText); } catch { return { _raw: bodyText }; }
+    }
 
     function setStatus(id, msg, ok=false) {
       const el = document.getElementById(id);
@@ -156,11 +180,12 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email, password })
         });
-        const j = await r.json();
+        const j = await safeJson(r);
         if (r.ok) {
           setStatus('regStatus', 'Registrado com sucesso.', true);
         } else {
-          setStatus('regStatus', j.error || 'Erro ao registrar');
+          const msg = j && j.error ? j.error : (j && j._raw ? j._raw : 'Erro ao registrar');
+          setStatus('regStatus', msg);
         }
       } catch (e) {
         setStatus('regStatus', e.message || 'Erro de rede');
@@ -177,13 +202,14 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email, password })
         });
-        const j = await r.json();
-        if (r.ok && j.token) {
+        const j = await safeJson(r);
+        if (r.ok && j && j.token) {
           localStorage.setItem('token', j.token);
           showToken();
           setStatus('loginStatus', 'Login OK, token armazenado.', true);
         } else {
-          setStatus('loginStatus', j.error || 'Login falhou');
+          const msg = j && j.error ? j.error : (j && j._raw ? j._raw : 'Login falhou');
+          setStatus('loginStatus', msg);
         }
       } catch (e) {
         setStatus('loginStatus', e.message || 'Erro de rede');
