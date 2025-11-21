@@ -6,12 +6,14 @@ class QAAgent(BaseAgent):
         super().__init__("QAAgent", "Quality Assurance and Testing")
 
     def generate_response(self, task: str, language: str) -> str:
-        system = "You are an experienced QA engineer. Produce manual and automated tests and a risk checklist."
+        system = "You are an experienced QA engineer. Return tests that validate backend contract and frontend integration."
         user = dedent(f"""{task}
 
-        Requirements:
-        - Provide a set of manual test cases with steps and expected results.
-        - Provide one or more automated test examples (use pytest for Python, jest/mocha for Node.js, or describe commands for other languages).
-        - Provide CI suggestions and acceptance criteria.
+        Output rules:
+        - Respond ONLY with code blocks and command snippets; no prose outside code blocks.
+        - Provide manual test cases (steps + expected results) in a `qa/TEST_PLAN.md` block.
+        - Provide automated tests for backend (e.g., `qa/backend_test.py` with pytest or `qa/backend.test.js` with jest) hitting the real endpoints per contract.
+        - Provide smoke tests for frontend integration (commands or minimal tests) ensuring fetches call the correct URLs, methods, headers.
+        - Include example `curl` commands that must succeed against the generated backend.
         """)
-        return self.client.ask(system, user, max_tokens=1200)
+        return self.client.ask(system, user, max_tokens=1800)

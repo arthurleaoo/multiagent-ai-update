@@ -41,6 +41,23 @@ def ensure_db():
         """
     )
 
+    # Nova tabela: histórico de prompts enviados aos agentes
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS history_prompts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            history_id INTEGER NOT NULL,
+            agent TEXT NOT NULL,           -- 'front' | 'back' | 'qa'
+            step TEXT,                     -- ex.: 'scaffold' | 'align' | 'generate'
+            system_prompt TEXT NOT NULL,
+            user_prompt TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(history_id) REFERENCES history(id)
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_history_prompts_history_id ON history_prompts(history_id)")
+
     # Migração leve: adiciona coluna user_id em history, se não existir
     try:
         cur.execute("PRAGMA table_info(history)")
@@ -76,48 +93,91 @@ class Orchestrator:
         
         # Inicializa todas as saídas como vazias
         front_out = ""
+        front_out_initial = ""
+        front_out_final = ""
         back_out = ""
         qa_out = ""
+
+        # Inicializa prompts (para logging)
+        front_system = "You are a senior front-end engineer. Return only code files with clean structure and API integration."
+        back_system = "You are a senior backend engineer. Return production-ready server code and a compact API contract."
+        qa_system = "You are an experienced QA engineer. Return tests that validate backend contract and frontend integration."
+        front_prompt = ""
+        front_align_prompt = ""
+        back_prompt_context = ""
+        qa_prompt_context = ""
 
         #Base da instrução de idioma para todos os agentes
         lang_instruction = "Sua resposta, incluindo todas as explicações, introduções e resumos, deve ser escrita em Português (pt-BR). Apenas o código gerado pode manter as convenções de variáveis da linguagem (geralmente inglês)."
         
-        # 1) Front generates UI (Executa se 'front' estiver na lista)
+        # 1) Front (Passo 1): gera estrutura básica e UI
         if "front" in agents_to_run:
             print(">>> 🖥️ FRONT-END AGENT: Ativado e gerando interface (HTML/CSS/JS)...") # NOVO
             
-            front_prompt = f"{lang_instruction}\nTask: {task}\nLanguage: {language}\n\nPlease provide the front-end implementation (HTML, CSS, and JavaScript) in three separate code blocks. Focus on clean code suitable to be used as implementation snippets."
-            
-            front_out = self.front.generate_response(front_prompt, language)
+            front_prompt = (
+                f"{lang_instruction}\n"
+                f"Task: {task}\nLanguage: {language}\n\n"
+                "Fase 1 (Scaffold): gere uma estrutura mínima e funcional de frontend em três arquivos "
+                "(`frontend/index.html`, `frontend/styles.css`, `frontend/script.js`) com fetchs parametrizados por `API_BASE`. "
+                "Responda APENAS com blocos de código rotulados com nomes de arquivo."
+            )
+
+            front_out_initial = self.front.generate_response(front_prompt, language)
+            front_out = front_out_initial
             print(">>> 🖥️ FRONT-END AGENT: Concluído.") # NOVO
 
-        # 2) Back generates API/logic (Executa se 'back' estiver na lista)
+        # 2) Back: gera API/negócio + contrato
         if "back" in agents_to_run:
             print(">>> ⚙️ BACK-END AGENT: Ativado e gerando lógica da API...") # NOVO
             
             # O prompt de contexto usa 'front_out' se ele tiver sido gerado, caso contrário usa ""
             # NOVO: Adiciona instrução de idioma ao prompt
-            back_prompt_context = f"{lang_instruction}\nTask: {task}\nLanguage: {language}\nFront output (for context):\n{front_out}\n\nPlease provide a backend implementation (code + explanation of routes, payloads and validation) in {language}. Respond only with code blocks and short comments suitable to be used as implementation snippets."
+            back_prompt_context = (
+                f"{lang_instruction}\n"
+                f"Task: {task}\nLanguage: {language}\nFront output (for context):\n{front_out}\n\n"
+                f"Forneça a implementação de backend em {language} e inclua um arquivo JSON `api_contract.json` "
+                "descrevendo rotas, métodos, payloads e exemplos de resposta conforme as regras de contrato. "
+                "Responda somente com blocos de código."
+            )
             
             back_out = self.back.generate_response(back_prompt_context, language)
             print(">>> ⚙️ BACK-END AGENT: Concluído.") # NOVO
 
-        # 3) QA reviews both outputs (Executa se 'qa' estiver na lista)
+        # 2.5) Front (Passo 2): realinha integração com contrato do back
+        if "front" in agents_to_run and "back" in agents_to_run:
+            print(">>> 🔁 FRONT-END AGENT (alinhamento): Integrando exatamente com o contrato da API...")
+            front_align_prompt = (
+                f"{lang_instruction}\n"
+                f"Task: {task}\nLanguage: {language}\n\n"
+                "Fase 2 (Integração): com base na saída do backend abaixo (inclui `api_contract.json`), "
+                "atualize `frontend/script.js` para consumir exatamente as rotas, métodos, JSON e headers. "
+                "Se necessário, ajuste `index.html` para exibir resultados das chamadas. "
+                "Responda APENAS com os mesmos três arquivos do frontend, integrados ao contrato.\n\n"
+                f"BACK OUTPUT:\n{back_out}"
+            )
+            front_out_final = self.front.generate_response(front_align_prompt, language)
+            front_out = front_out_final or front_out_initial
+            print(">>> 🔁 FRONT-END AGENT (alinhamento): Concluído.")
+
+        # 3) QA: revisa outputs finais
         if "qa" in agents_to_run:
             print(">>> 🧪 QA AGENT: Ativado e gerando testes e critérios de qualidade...") # NOVO
             
             # NOVO: Adiciona instrução de idioma ao prompt
-            qa_prompt_context = f"{lang_instruction}\nTask: {task}\nLanguage: {language}\nFront output:\n{front_out}\n\nBack output:\n{back_out}\n\nComo engenheiro de QA, gere: 1) Casos de teste manuais (passos + resultados esperados), 2) Exemplos de testes automatizados para a linguagem escolhida (se aplicável), e 3) Um checklist de pontos de integração e riscos potenciais. Seja explícito sobre quais comandos rodar para executar os testes."
+            qa_prompt_context = (
+                f"{lang_instruction}\nTask: {task}\nLanguage: {language}\n"
+                f"Front output (final):\n{front_out}\n\nBack output:\n{back_out}\n\n"
+                "Como engenheiro de QA, gere: 1) Casos de teste manuais, 2) Testes automatizados para backend/contract, 3) Smoke tests de integração do frontend, e 4) Checklist de riscos. Inclua comandos exatos (curl/pytest/jest)."
+            )
             
             qa_out = self.qa.generate_response(qa_prompt_context, language)
             print(">>> 🧪 QA AGENT: Concluído.") # NOVO
 
-        # persist
+        # persist + logging de prompts
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
-        # Persiste todas as saídas, incluindo associação opcional ao usuário
-        # Detecta dinamicamente se a coluna user_id existe
         try:
+            # Persiste todas as saídas, incluindo associação opcional ao usuário
             cur.execute("PRAGMA table_info(history)")
             cols = [row[1] for row in cur.fetchall()]
             created_at = datetime.utcnow().isoformat()
@@ -131,6 +191,26 @@ class Orchestrator:
                     "INSERT INTO history (task, language, front_response, back_response, qa_response, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                     (task, language, front_out, back_out, qa_out, created_at)
                 )
+            history_id = cur.lastrowid
+
+            # Insere prompts por agente/etapa (somente os que foram executados)
+            def insert_prompt(agent: str, step: str, system_prompt: str, user_prompt: str):
+                if not user_prompt:
+                    return
+                cur.execute(
+                    "INSERT INTO history_prompts (history_id, agent, step, system_prompt, user_prompt, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (history_id, agent, step, system_prompt, user_prompt, created_at)
+                )
+
+            if "front" in agents_to_run and front_prompt:
+                insert_prompt("front", "scaffold", front_system, front_prompt)
+            if "back" in agents_to_run and back_prompt_context:
+                insert_prompt("back", "generate", back_system, back_prompt_context)
+            if "front" in agents_to_run and front_align_prompt:
+                insert_prompt("front", "align", front_system, front_align_prompt)
+            if "qa" in agents_to_run and qa_prompt_context:
+                insert_prompt("qa", "generate", qa_system, qa_prompt_context)
+
             conn.commit()
         finally:
             conn.close()
