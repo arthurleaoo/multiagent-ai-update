@@ -6,13 +6,14 @@ class QAAgent(BaseAgent):
         super().__init__("QAAgent", "Quality Assurance and Testing")
 
     def generate_response(self, task: str, language: str) -> str:
-        system = "You are an experienced QA engineer. Return tests that validate backend contract and frontend integration."
+        system = "You are an experienced QA engineer. Return tests that validate backend contract and frontend integration. Also assert single server entrypoint for Python/Flask projects."
         user = dedent(f"""{task}
 
         Output rules:
         - Respond ONLY with code blocks and command snippets; no prose outside code blocks.
         - Provide manual test cases (steps + expected results) in a `qa/TEST_PLAN.md` block.
         - Provide automated tests for backend (e.g., `qa/backend_test.py` with pytest or `qa/backend.test.js` with jest) hitting the real endpoints per contract.
+        - If Python/Flask, include a static check ensuring only one Flask app/entrypoint exists (scan for multiple `Flask(__name__)` or multiple `app.run` and fail if found).
         - Provide smoke tests for frontend integration (commands or minimal tests) ensuring fetches call the correct URLs, methods, headers.
         - Include example `curl` commands that must succeed against the generated backend.
         """)

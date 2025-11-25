@@ -29,11 +29,42 @@ def get_serializer() -> URLSafeTimedSerializer:
 
 
 def hash_password(password: str) -> str:
-    return generate_password_hash(password)
+    # Opcional: pepper (segredo adicional) para fortalecer hashes
+    pepper = os.getenv("PASSWORD_PEPPER", "")
+    return generate_password_hash(password + pepper)
 
 
 def verify_password(password_hash: str, password: str) -> bool:
-    return check_password_hash(password_hash, password)
+    pepper = os.getenv("PASSWORD_PEPPER", "")
+    return check_password_hash(password_hash, password + pepper)
+
+
+def validate_password_strength(password: str) -> tuple[bool, str]:
+    """
+    Regras de força de senha (equilíbrio entre segurança e usabilidade):
+    - Mínimo 8 caracteres
+    - Pelo menos 1 letra minúscula
+    - Pelo menos 1 letra maiúscula
+    - Pelo menos 1 dígito
+    - Pelo menos 1 caractere especial (ex.: !@#$%^&*_-)
+    Retorna (ok, mensagem_de_erro_se_houver)
+    """
+    if len(password) < 8:
+        return False, "Senha deve conter pelo menos 8 caracteres"
+    has_lower = any(c.islower() for c in password)
+    has_upper = any(c.isupper() for c in password)
+    has_digit = any(c.isdigit() for c in password)
+    specials = set("!@#$%^&*()-_=+[]{};:,.<>/?|\\")
+    has_special = any(c in specials for c in password)
+    if not has_lower:
+        return False, "Senha deve conter pelo menos 1 letra minúscula"
+    if not has_upper:
+        return False, "Senha deve conter pelo menos 1 letra maiúscula"
+    if not has_digit:
+        return False, "Senha deve conter pelo menos 1 dígito"
+    if not has_special:
+        return False, "Senha deve conter pelo menos 1 caractere especial"
+    return True, ""
 
 
 def create_token(user_id: int) -> str:

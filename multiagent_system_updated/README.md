@@ -27,6 +27,10 @@ Projeto multiagente em Python (Front / Back / QA) que aceita a linguagem desejad
 ### Variáveis de ambiente
 - `SECRET_KEY`: chave de assinatura dos tokens (obrigatória em produção). Caso ausente, uma chave efêmera é gerada em dev.
 - `TOKEN_MAX_AGE` (opcional): tempo de validade do token em segundos (padrão 604800 = 7 dias).
+- `PASSWORD_PEPPER` (opcional, recomendado em produção): segredo adicional concatenado às senhas antes de hashear (reforça contra vazamentos de hash).
+- `LOGIN_LOCK_THRESHOLD` (padrão 5): número de tentativas de login falhas antes de bloquear temporariamente.
+- `LOGIN_LOCK_WINDOW_MINUTES` (padrão 15): janela em minutos para contar tentativas.
+- `LOGIN_LOCK_DURATION_MINUTES` (padrão 15): tempo de bloqueio após exceder o limite.
 
 ### Registro
 POST `http://127.0.0.1:5000/auth/register`
@@ -41,8 +45,7 @@ Resposta (201):
 ```
 {
   "id": 1,
-  "email": "user@example.com",
-  "token": "<Bearer Token>"
+  "email": "user@example.com"
 }
 ```
 
@@ -63,6 +66,11 @@ Resposta (200):
   "token": "<Bearer Token>"
 }
 ```
+
+Observações de segurança:
+- Política de senha: mínimo 8 caracteres, 1 maiúscula, 1 minúscula, 1 dígito e 1 especial.
+- Rate limiting: após múltiplas falhas em curta janela, a conta fica temporariamente bloqueada (429) e é desbloqueada automaticamente depois do período configurado.
+- Pepper opcional: definir `PASSWORD_PEPPER` em produção aumenta a resiliência contra ataques a hashes.
 
 ### Perfil
 GET `http://127.0.0.1:5000/auth/me`

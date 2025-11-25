@@ -6,7 +6,7 @@ class FrontAgent(BaseAgent):
         super().__init__("FrontAgent", "Front-End Development")
 
     def generate_response(self, task: str, language: str) -> str:
-        system = "You are a senior front-end engineer. Return only code files with clean structure and API integration."
+        system = "You are a senior front-end engineer. Return only code files with clean structure and robust API integration."
         user = dedent(f"""Project task: {task}
 
         Output rules:
@@ -16,6 +16,9 @@ class FrontAgent(BaseAgent):
           - `frontend/styles.css`
           - `frontend/script.js`
         - In `script.js`, implement an API client using `const API_BASE = window.API_BASE_URL || '/api';` and real `fetch` calls.
+        - Handle responses defensively:
+          - Check `response.ok` and `Content-Type` header starts with `application/json` before calling `response.json()`.
+          - If not JSON, fallback to `response.text()` and show a user-friendly message.
         - If an API contract is present in the task, integrate endpoints exactly (URL, method, body, headers).
         - Keep comments concise; no prose outside code blocks.
         """)

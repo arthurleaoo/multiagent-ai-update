@@ -117,13 +117,21 @@
       try {
         const qp = new URLSearchParams(window.location.search);
         const override = qp.get('api');
-        if (override) return override;
+        if (override) return override; // permite forçar: ?api=http://localhost:3000
+
+        // Quando servido em 5500 (dev do frontend), redireciona para backend padrão
+        const port = window.location.port;
+        if (port === '5500') {
+          // Por padrão Express usa 3000; altere para 5001 se estiver usando Flask
+          return 'http://127.0.0.1:3000';
+        }
+
         const origin = window.location.origin;
         if (origin && /^https?:\/\//i.test(origin)) return origin;
-        // Fallback para quando a página é aberta via file:// ou outro esquema
-        return 'http://127.0.0.1:5000';
+        // Fallback alinhado aos presets do gerador
+        return 'http://127.0.0.1:5001';
       } catch (e) {
-        return 'http://127.0.0.1:5000';
+        return 'http://127.0.0.1:5001';
       }
     }
     const apiBase = resolveApiBase();

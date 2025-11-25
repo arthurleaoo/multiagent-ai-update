@@ -58,6 +58,21 @@ def ensure_db():
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_history_prompts_history_id ON history_prompts(history_id)")
 
+    # Nova tabela: tentativas de login (rate limiting / lockout)
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS login_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL,
+            ip TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_attempt_at TEXT,
+            locked_until TEXT
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_login_attempts_email ON login_attempts(email)")
+
     # Migração leve: adiciona coluna user_id em history, se não existir
     try:
         cur.execute("PRAGMA table_info(history)")
