@@ -170,6 +170,106 @@ def _sanitize_front_js(content: str) -> str:
     text = re.sub(r"(?<!\w)users\s*\.\s*forEach\s*\(", safe_iter + ".forEach(", text)
     return text
 
+def _infer_resource(task: str, front: Optional[str], back: Optional[str], qa: Optional[str]) -> str:
+    """Infer the desired resource collection name from task text and any code/spec blocks.
+    - Looks for '/api/<resource>' in provided texts
+    - Parses JSON-like 'path' fields if present
+    - Falls back to a word after 'CRUD de' in Portuguese or 'CRUD of' in English
+    - Default: 'users'
+    """
+    texts = [task or "", front or "", back or "", qa or ""]
+    candidates: list[str] = []
+    for t in texts:
+        # paths like /api/users or /users
+        for m in re.findall(r"/(?:api/)?([a-zA-Z][a-zA-Z0-9_-]+)(?:/|\b)", t):
+            if m.lower() in ("health",):
+                continue
+            candidates.append(m.lower())
+        # JSON contract paths: "path": "/users"
+        for m in re.findall(r"\"path\"\s*:\s*\"/(?:api/)?([a-zA-Z0-9_-]+)\"", t):
+            candidates.append(m.lower())
+        # Portuguese 'CRUD de <algo>' or English 'CRUD of <something>'
+        m1 = re.search(r"crud\s+de\s+([a-zA-Zçáéíóúâêôãõü]+)", t, re.IGNORECASE)
+        if m1:
+            candidates.append(m1.group(1).lower())
+        m2 = re.search(r"crud\s+of\s+([a-zA-Z]+)", t, re.IGNORECASE)
+        if m2:
+            candidates.append(m2.group(1).lower())
+    if candidates:
+        from collections import Counter
+        resource = Counter(candidates).most_common(1)[0][0]
+    else:
+        resource = "users"
+    if resource.endswith("/:"):
+        resource = resource.split("/:")[0]
+    if resource.endswith(":id"):
+        resource = resource[:-3]
+    if not resource.endswith("s"):
+        if resource.endswith("m"):
+            resource = resource[:-1] + "ns"
+        elif resource.endswith("y"):
+            resource = resource[:-1] + "ies"
+        else:
+            resource = resource + "s"
+    return re.sub(r"[^a-z0-9_-]", "", resource)
+
+def _build_express_crud(resource: str) -> str:
+    """Generate an Express in-memory CRUD for the given resource with Page-like response."""
+    r = resource
+    return (
+        "const express = require('express');\n"
+        "const cors = require('cors');\n"
+        "const app = express();\n"
+        "const PORT = process.env.PORT || 3000;\n\n"
+        "app.use(cors());\n"
+        "app.use(express.json());\n\n"
+        "// Healthcheck\n"
+        "app.get('/health', (req,res)=>res.json({status:'ok'}));\n\n"
+        "// Estado em memória para '" + r + "'\n"
+        "const records = [];\n"
+        "let currentId = 1;\n\n"
+        "// GET /api/" + r + " (Page-like)\n"
+        "app.get('/api/" + r + "', (req, res) => {\n"
+        "  const name = (req.query.name || '').toString().toLowerCase();\n"
+        "  const size = Math.max(1, parseInt(req.query.size || '10', 10));\n"
+        "  const page = Math.max(0, parseInt(req.query.page || '0', 10));\n\n"
+        "  const filtered = name ? records.filter(u => (u.name || '').toLowerCase().includes(name)) : records;\n"
+        "  const start = page * size;\n"
+        "  const end = start + size;\n"
+        "  const content = filtered.slice(start, end);\n\n"
+        "  res.json({ content, totalElements: filtered.length, size, number: page });\n"
+        "});\n\n"
+        "// POST /api/" + r + "\n"
+        "app.post('/api/" + r + "', (req, res) => {\n"
+        "  const { name } = req.body || {};\n"
+        "  if (!name || typeof name !== 'string') {\n"
+        "    return res.status(400).json({ error: 'name é obrigatório' });\n"
+        "  }\n"
+        "  const rec = { id: currentId++, name };\n"
+        "  records.push(rec);\n"
+        "  res.status(201).json(rec);\n"
+        "});\n\n"
+        "// PUT /api/" + r + "/:id\n"
+        "app.put('/api/" + r + "/:id', (req, res) => {\n"
+        "  const id = Number(req.params.id);\n"
+        "  const { name } = req.body || {};\n"
+        "  const idx = records.findIndex(u => u.id === id);\n"
+        "  if (idx === -1) return res.status(404).json({ error: 'Registro não encontrado' });\n"
+        "  if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name é obrigatório' });\n"
+        "  records[idx].name = name;\n"
+        "  res.json(records[idx]);\n"
+        "});\n\n"
+        "// DELETE /api/" + r + "/:id\n"
+        "app.delete('/api/" + r + "/:id', (req, res) => {\n"
+        "  const id = Number(req.params.id);\n"
+        "  const idx = records.findIndex(u => u.id === id);\n"
+        "  if (idx === -1) return res.status(404).json({ error: 'Registro não encontrado' });\n"
+        "  records.splice(idx, 1);\n"
+        "  res.status(204).send();\n"
+        "});\n\n"
+        "app.listen(PORT, ()=>console.log('Server on ' + PORT));\n"
+    )
+
 def _sanitize_java(content: str) -> str:
     """Remove cabeçalhos de texto livres antes do código Java para evitar erros de compilação."""
     lines = (content or "").splitlines()
@@ -562,8 +662,12 @@ Testes rápidos de API (Flask):
                 # scaffold mínimo para app único (com CORS)
                 pkg = """{\n  \"name\": \"generated-server\",\n  \"version\": \"0.1.0\",\n  \"private\": true,\n  \"scripts\": {\n    \"start\": \"node src/index.js\"\n  },\n  \"dependencies\": {\n    \"express\": \"^4.18.2\",\n    \"cors\": \"^2.8.5\"\n  }\n}\n"""
                 zf.writestr("backend/package.json", pkg)
-                # Override: Express com rotas /api/tasks prontas (CRUD completo)
-                zf.writestr("backend/src/index.js", """const express = require('express');\nconst cors = require('cors');\nconst app = express();\nconst PORT = process.env.PORT || 3000;\n\napp.use(cors());\napp.use(express.json());\n\n// Healthcheck\napp.get('/health', (req,res)=>res.json({status:'ok'}));\n\n// Tarefas em memória\nconst tasks = [];\nlet currentId = 1;\n\n// Listar tarefas\napp.get('/api/tasks', (req, res) => {\n  res.json({ tasks });\n});\n\n// Criar tarefa\napp.post('/api/tasks', (req, res) => {\n  const { task } = req.body || {};\n  if (!task) return res.status(400).json({ error: 'Tarefa é obrigatória' });\n  const t = { id: currentId++, task };\n  tasks.push(t);\n  res.status(201).json(t);\n});\n\n// Atualizar tarefa\napp.put('/api/tasks/:id', (req, res) => {\n  const id = Number(req.params.id);\n  const { task } = req.body || {};\n  const idx = tasks.findIndex(t => t.id === id);\n  if (idx === -1) return res.status(404).json({ error: 'Tarefa não encontrada' });\n  if (!task) return res.status(400).json({ error: 'Tarefa é obrigatória' });\n  tasks[idx].task = task;\n  res.json(tasks[idx]);\n});\n\n// Deletar tarefa\napp.delete('/api/tasks/:id', (req, res) => {\n  const id = Number(req.params.id);\n  const idx = tasks.findIndex(t => t.id === id);\n  if (idx === -1) return res.status(404).json({ error: 'Tarefa não encontrada' });\n  const removed = tasks.splice(idx, 1)[0];\n  res.json(removed);\n});\n\napp.listen(PORT, ()=>console.log('Server on ' + PORT));\n""")
+                # Express CRUD gerado dinamicamente conforme a entidade solicitada no prompt/contrato
+                try:
+                    resource = _infer_resource(task or "", front, back, qa)
+                except Exception:
+                    resource = "users"
+                zf.writestr("backend/src/index.js", _build_express_crud(resource))
 
             spring_main_written = False
             saw_java = False
@@ -909,8 +1013,12 @@ f'- POST http://127.0.0.1:{api_port}/api/tasks Body: {{"task":"Nova tarefa"}}\n'
         elif preset == "express":
             pkg = """{\n  \"name\": \"{name}\",\n  \"version\": \"0.1.0\",\n  \"private\": true,\n  \"scripts\": {\n    \"start\": \"node src/index.js\"\n  },\n  \"dependencies\": {\n    \"express\": \"^4.18.2\",\n    \"cors\": \"^2.8.5\"\n  }\n}\n""".replace("{name}", project_name)
             zf.writestr("backend/package.json", pkg)
-            # Override: Express com rotas /api/tasks prontas (CRUD completo)
-            zf.writestr("backend/src/index.js", """const express = require('express');\nconst cors = require('cors');\nconst app = express();\nconst PORT = process.env.PORT || 3000;\n\napp.use(cors());\napp.use(express.json());\n\n// Healthcheck\napp.get('/health', (req,res)=>res.json({status:'ok'}));\n\n// Tarefas em memória\nconst tasks = [];\nlet currentId = 1;\n\n// Listar tarefas\napp.get('/api/tasks', (req, res) => {\n  res.json({ tasks });\n});\n\n// Criar tarefa\napp.post('/api/tasks', (req, res) => {\n  const { task } = req.body || {};\n  if (!task) return res.status(400).json({ error: 'Tarefa é obrigatória' });\n  const t = { id: currentId++, task };\n  tasks.push(t);\n  res.status(201).json(t);\n});\n\n// Atualizar tarefa\napp.put('/api/tasks/:id', (req, res) => {\n  const id = Number(req.params.id);\n  const { task } = req.body || {};\n  const idx = tasks.findIndex(t => t.id === id);\n  if (idx === -1) return res.status(404).json({ error: 'Tarefa não encontrada' });\n  if (!task) return res.status(400).json({ error: 'Tarefa é obrigatória' });\n  tasks[idx].task = task;\n  res.json(tasks[idx]);\n});\n\n// Deletar tarefa\napp.delete('/api/tasks/:id', (req, res) => {\n  const id = Number(req.params.id);\n  const idx = tasks.findIndex(t => t.id === id);\n  if (idx === -1) return res.status(404).json({ error: 'Tarefa não encontrada' });\n  const removed = tasks.splice(idx, 1)[0];\n  res.json(removed);\n});\n\napp.listen(PORT, ()=>console.log('Server on ' + PORT));\n""")
+            # Express CRUD gerado dinamicamente conforme a entidade solicitada
+            try:
+                resource = _infer_resource(task or "", front, back, qa)
+            except Exception:
+                resource = "users"
+            zf.writestr("backend/src/index.js", _build_express_crud(resource))
         elif preset == "spring":
             pom = f"""
 <project xmlns=\"http://maven.apache.org/POM/4.0.0\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd\">
