@@ -1,5 +1,6 @@
 import io
 import re
+from turtle import reset
 import zipfile
 from typing import Optional
 
@@ -694,7 +695,7 @@ Testes rápidos de API (Flask):
                     content = _sanitize_java_entity_table(content)
                     content = _sanitize_java_entity_table(content)
 
-                if preset == "spring" and lang == "java":
+                if reset == "spring" and lang == "java":
                     saw_java = True
                     pkg_path, cls = _java_path_and_name(content)
                     # registra pacote para cálculo de scan base
@@ -711,7 +712,7 @@ Testes rápidos de API (Flask):
                     name = _sanitize_java_filename(fn, cls)
                     path = f"backend/src/main/java/{pkg_path}/{name}"
                     zf.writestr(path, content)
-                elif preset == "spring" and lang in ("xml", "pom") and ("<project" in content):
+                elif reset == "spring" and lang in ("xml", "pom") and ("<project" in content):
                     # Provável pom.xml — complementa com JPA/H2, jakarta.persistence-api e plugin se faltarem
                     def _augment_spring_pom(xml: str) -> str:
                         out = xml
