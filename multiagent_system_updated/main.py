@@ -10,7 +10,7 @@ import sqlite3
 from src.core.orchestrator import Orchestrator, DB_PATH, ensure_db
 from src.core.auth import (
     hash_password, verify_password, create_token, verify_token,
-    validate_password_strength
+    validate_password_strength, create_reset_token, verify_reset_token, send_reset_email
 )
 from src.core.packager import build_project_zip, build_structured_zip
 
@@ -142,6 +142,116 @@ def auth_me():
             return jsonify({"error": "Usuário não encontrado"}), 404
 
         return jsonify({"id": row[0], "email": row[1], "created_at": row[2]}), 200
+    finally:
+        conn.close()
+
+
+@app.route("/auth/request_password_reset", methods=["POST"])
+def auth_request_password_reset():
+    data = request.get_json(force=True)
+    email = (data.get("email") or "").strip().lower()
+    if not email:
+        return jsonify({"error": "Campo 'email' é obrigatório"}), 400
+
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM users WHERE email = ?", (email,))
+        row = cur.fetchone()
+        if not row:
+            return jsonify({"message": "Se existir, enviaremos instruções", "reset_token": None}), 200
+        token = create_reset_token(int(row[0]))
+        sent = send_reset_email(email, token)
+        payload = {"message": "Token de reset gerado", "reset_token": token}
+        if sent and not DEBUG:
+            payload["reset_token"] = None
+            payload["message"] = "Instruções enviadas por email"
+        return jsonify(payload), 200
+    finally:
+        conn.close()
+
+
+@app.route("/auth/reset_password", methods=["POST"])
+def auth_reset_password():
+    data = request.get_json(force=True)
+    token = data.get("token") or ""
+    new_password = data.get("new_password") or ""
+    if not token or not new_password:
+        return jsonify({"error": "Campos 'token' e 'new_password' são obrigatórios"}), 400
+
+    ok, msg = validate_password_strength(new_password)
+    if not ok:
+        return jsonify({"error": msg}), 400
+
+    uid = verify_reset_token(token)
+    if not uid:
+        return jsonify({"error": "Token inválido ou expirado"}), 400
+
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM users WHERE id = ?", (uid,))
+        row = cur.fetchone()
+        if not row:
+            return jsonify({"error": "Usuário não encontrado"}), 404
+        pwd_hash = hash_password(new_password)
+        cur.execute("UPDATE users SET password_hash = ? WHERE id = ?", (pwd_hash, uid))
+        conn.commit()
+        return jsonify({"message": "Senha atualizada"}), 200
+    finally:
+        conn.close()
+
+
+@app.route("/auth/update_password", methods=["PUT"])
+def auth_update_password():
+    uid = get_bearer_user_id()
+    if not uid:
+        return jsonify({"error": "Não autenticado"}), 401
+    data = request.get_json(force=True)
+    old_password = data.get("old_password") or ""
+    new_password = data.get("new_password") or ""
+    if not old_password or not new_password:
+        return jsonify({"error": "Campos 'old_password' e 'new_password' são obrigatórios"}), 400
+
+    ok, msg = validate_password_strength(new_password)
+    if not ok:
+        return jsonify({"error": msg}), 400
+
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT password_hash FROM users WHERE id = ?", (uid,))
+        row = cur.fetchone()
+        if not row or not verify_password(row[0], old_password):
+            return jsonify({"error": "Senha atual incorreta"}), 401
+        pwd_hash = hash_password(new_password)
+        cur.execute("UPDATE users SET password_hash = ? WHERE id = ?", (pwd_hash, uid))
+        conn.commit()
+        return jsonify({"message": "Senha atualizada"}), 200
+    finally:
+        conn.close()
+
+
+@app.route("/auth/delete_account", methods=["DELETE"])
+def auth_delete_account():
+    uid = get_bearer_user_id()
+    if not uid:
+        return jsonify({"error": "Não autenticado"}), 401
+    data = request.get_json(force=True)
+    password = data.get("password") or ""
+    if not password:
+        return jsonify({"error": "Campo 'password' é obrigatório"}), 400
+
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT password_hash FROM users WHERE id = ?", (uid,))
+        row = cur.fetchone()
+        if not row or not verify_password(row[0], password):
+            return jsonify({"error": "Senha inválida"}), 401
+        cur.execute("DELETE FROM users WHERE id = ?", (uid,))
+        conn.commit()
+        return "", 204
     finally:
         conn.close()
 

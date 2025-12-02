@@ -1,6 +1,9 @@
 import os
 from datetime import datetime
 from typing import Optional
+import smtplib
+from email.message import EmailMessage
+from urllib.parse import urlencode
 
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -89,3 +92,82 @@ def verify_token(token: str, max_age_seconds: Optional[int] = None) -> Optional[
         return int(data.get("uid"))
     except (BadSignature, SignatureExpired, ValueError, TypeError):
         return None
+
+
+def create_reset_token(user_id: int) -> str:
+    s = get_serializer()
+    payload = {"uid": user_id, "type": "reset", "iat": int(datetime.utcnow().timestamp())}
+    return s.dumps(payload)
+
+
+def verify_reset_token(token: str, max_age_seconds: Optional[int] = None) -> Optional[int]:
+    s = get_serializer()
+    if max_age_seconds is None:
+        max_age_seconds = int(os.getenv("RESET_TOKEN_MAX_AGE", "3600"))
+    try:
+        data = s.loads(token, max_age=max_age_seconds)
+        if data.get("type") != "reset":
+            return None
+        return int(data.get("uid"))
+    except (BadSignature, SignatureExpired, ValueError, TypeError):
+        return None
+
+
+def _smtp_config() -> Optional[dict]:
+    host = os.getenv("SMTP_HOST")
+    port = os.getenv("SMTP_PORT")
+    user = os.getenv("SMTP_USER")
+    password = os.getenv("SMTP_PASSWORD")
+    mail_from = os.getenv("MAIL_FROM") or user
+    use_ssl = os.getenv("SMTP_USE_SSL", "false").lower() in ("1", "true", "yes")
+    use_tls = os.getenv("SMTP_USE_TLS", "true").lower() in ("1", "true", "yes")
+    if not host or not port or not mail_from:
+        return None
+    try:
+        port_i = int(port)
+    except Exception:
+        return None
+    return {
+        "host": host,
+        "port": port_i,
+        "user": user,
+        "password": password,
+        "from": mail_from,
+        "ssl": use_ssl,
+        "tls": use_tls,
+    }
+
+
+def send_reset_email(to_email: str, token: str) -> bool:
+    cfg = _smtp_config()
+    if not cfg:
+        return False
+    reset_url = os.getenv("APP_RESET_URL")
+    link = None
+    if reset_url:
+        q = urlencode({"token": token})
+        link = f"{reset_url}?{q}"
+    body = f"Se você solicitou a redefinição de senha, use este token:\n\n{token}\n"
+    if link:
+        body += f"\nOu acesse: {link}\n"
+    msg = EmailMessage()
+    msg["Subject"] = "Redefinição de senha"
+    msg["From"] = cfg["from"]
+    msg["To"] = to_email
+    msg.set_content(body)
+    try:
+        if cfg["ssl"]:
+            with smtplib.SMTP_SSL(cfg["host"], cfg["port"]) as s:
+                if cfg["user"] and cfg["password"]:
+                    s.login(cfg["user"], cfg["password"])
+                s.send_message(msg)
+        else:
+            with smtplib.SMTP(cfg["host"], cfg["port"]) as s:
+                if cfg["tls"]:
+                    s.starttls()
+                if cfg["user"] and cfg["password"]:
+                    s.login(cfg["user"], cfg["password"])
+                s.send_message(msg)
+        return True
+    except Exception:
+        return False
