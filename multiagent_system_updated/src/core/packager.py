@@ -592,7 +592,7 @@ Testes rápidos de API (Flask):
 
         # BACKEND
         if back:
-            zf.writestr("backend/README.md", back)
+            zf.writestr("backend/BACK_RAW.md", back)
             # Opcional: tenta extrair blocos e escrever arquivos com heurísticas
             back_blocks = _extract_code_blocks(back)
 
@@ -927,7 +927,7 @@ Testes rápidos de API (Flask):
     return mem
 
 
-def build_structured_zip(task: str, language: str, front: str, back: str, qa: str, preset: str = "flask", project_name: str = "projeto", group_id: str = "com.example", contract: dict | None = None) -> io.BytesIO:
+def build_structured_zip(task: str, language: str, front: str, back: str, qa: str, preset: str = "flask", project_name: str = "projeto", group_id: str = "com.example", contract: dict | None = None, include_front: bool = True) -> io.BytesIO:
     """
     Gera um ZIP com estrutura de projeto completa baseada em 'preset':
       - flask: backend Python/Flask
@@ -981,21 +981,22 @@ f'- POST http://127.0.0.1:{api_port}/api/tasks Body: {{"task":"Nova tarefa"}}\n'
         )
         zf.writestr("README.md", top_readme_structured)
 
-        # Frontend (mesma lógica do build_project_zip, com porta por preset)
-        front_blocks = _extract_code_blocks(front)
-        desired = {"index.html": None, "styles.css": None, "script.js": None}
-        for b in front_blocks:
-            fn = (b.get("filename") or "").lower()
-            if fn in desired and desired[fn] is None:
-                desired[fn] = b["content"]
-        fb_idx = 0
-        for key in desired:
-            if desired[key] is None and fb_idx < len(front_blocks):
-                desired[key] = front_blocks[fb_idx]["content"]
-                fb_idx += 1
-        # Pós-processa para garantir API_BASE e fallbacks conforme preset
-        default_port = 5001 if preset == "flask" else (3000 if preset == "express" else 8080)
-        desired = _postprocess_front_files(desired, base_url_hint="/api", default_port=default_port)
+        # Frontend opcional, só quando solicitado
+        if include_front:
+            front_blocks = _extract_code_blocks(front)
+            desired = {"index.html": None, "styles.css": None, "script.js": None}
+            for b in front_blocks:
+                fn = (b.get("filename") or "").lower()
+                if fn in desired and desired[fn] is None:
+                    desired[fn] = b["content"]
+            fb_idx = 0
+            for key in desired:
+                if desired[key] is None and fb_idx < len(front_blocks):
+                    desired[key] = front_blocks[fb_idx]["content"]
+                    fb_idx += 1
+            # Pós-processa para garantir API_BASE e fallbacks conforme preset
+            default_port = 5001 if preset == "flask" else (3000 if preset == "express" else 8080)
+            desired = _postprocess_front_files(desired, base_url_hint="/api", default_port=default_port)
 
         def _fe_contract_endpoints(c: dict) -> list[dict]:
             arr: list[dict] = []
@@ -1025,12 +1026,12 @@ f'- POST http://127.0.0.1:{api_port}/api/tasks Body: {{"task":"Nova tarefa"}}\n'
                     return True
             return False
 
-        has_tasks_list = _ep_exists("GET", "/tasks")
-        has_tasks_create = _ep_exists("POST", "/tasks")
-        has_tasks_update = _ep_exists("PUT", "/tasks/:id")
-        has_tasks_delete = _ep_exists("DELETE", "/tasks/:id")
+        has_tasks_list = _ep_exists("GET", "/tasks") if include_front else False
+        has_tasks_create = _ep_exists("POST", "/tasks") if include_front else False
+        has_tasks_update = _ep_exists("PUT", "/tasks/:id") if include_front else False
+        has_tasks_delete = _ep_exists("DELETE", "/tasks/:id") if include_front else False
 
-        if has_tasks_list and has_tasks_create and has_tasks_update and has_tasks_delete:
+        if include_front and has_tasks_list and has_tasks_create and has_tasks_update and has_tasks_delete:
             desired["index.html"] = (
                 "<!DOCTYPE html>\n"
                 "<html lang=\"pt-BR\">\n"
@@ -1099,24 +1100,25 @@ f'- POST http://127.0.0.1:{api_port}/api/tasks Body: {{"task":"Nova tarefa"}}\n'
                 "  const name=(newName.value||'').trim();\n"
                 "  if(!name)return;\n"
                 "  const r=await fetch(API_BASE+'/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});\n"
-                "  if(r.ok){newName.value='';await loadTasks();}\n"
+                "  if(r.ok){newName.value='';await loadTasks();} else { console.error('POST /tasks failed', r.status); }\n"
                 "}\n"
                 "async function updateTask(id,name){\n"
                 "  const r=await fetch(API_BASE+'/tasks/'+encodeURIComponent(id),{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});\n"
-                "  if(r.ok){await loadTasks();}\n"
+                "  if(r.ok){await loadTasks();} else { console.error('PUT /tasks/'+id+' failed', r.status); }\n"
                 "}\n"
                 "async function deleteTask(id){\n"
                 "  const r=await fetch(API_BASE+'/tasks/'+encodeURIComponent(id),{method:'DELETE'});\n"
-                "  if(r.ok){await loadTasks();}\n"
+                "  if(r.ok){await loadTasks();} else { console.error('DELETE /tasks/'+id+' failed', r.status); }\n"
                 "}\n"
                 "addBtn.onclick=addTask;\n"
                 "loadTasks();\n"
             )
-        for fn, content in desired.items():
-            if content:
-                zf.writestr(f"frontend/{fn}", content)
-        if front:
-            zf.writestr("frontend/FRONT_RAW.md", front)
+        if include_front:
+            for fn, content in desired.items():
+                if content:
+                    zf.writestr(f"frontend/{fn}", content)
+            if front:
+                zf.writestr("frontend/FRONT_RAW.md", front)
 
         def _contract_endpoints(c: dict) -> list[dict]:
             eps: list[dict] = []
@@ -1173,93 +1175,53 @@ f'- POST http://127.0.0.1:{api_port}/api/tasks Body: {{"task":"Nova tarefa"}}\n'
         elif preset == "express":
             pkg = """{\n  \"name\": \"{name}\",\n  \"version\": \"0.1.0\",\n  \"private\": true,\n  \"scripts\": {\n    \"start\": \"node src/index.js\"\n  },\n  \"dependencies\": {\n    \"express\": \"^4.18.2\",\n    \"cors\": \"^2.8.5\"\n  }\n}\n""".replace("{name}", project_name)
             zf.writestr("backend/package.json", pkg)
-            # Tenta usar código de servidor do back como base
-            base_server_js: str | None = None
-            back_blocks_try = _extract_code_blocks(back)
-            for b in back_blocks_try:
-                fn = (b.get("filename") or "").lower()
-                lang = (b.get("language") or "").lower()
-                content = b.get("content") or ""
-                if lang in ("javascript", "js") and ("express" in content.lower()):
-                    if (not fn) or any(fn.endswith(x) for x in ("index.js", "server.js", "app.js", "main.js")):
-                        base_server_js = _sanitize_express_js(content)
-                        break
-            if base_server_js:
-                js = base_server_js
-                # Garante middleware básico
-                if "app.use(express.json())" not in js:
-                    js += "\napp.use(express.json())\n"
-                if "const cors" not in js and "app.use(cors())" not in js:
-                    js = "const cors = require('cors')\n" + js + "\napp.use(cors())\napp.options('*', cors())\n"
-                # Health
-                if "/health" not in js:
-                    js += "\napp.get('/health', (req,res)=>res.json({status:'ok'}))\n"
-                # Injeta endpoints do contrato que faltarem
-                has_tasks_state = ("let tasks =" in js) or ("const tasks =" in js)
-                if not has_tasks_state and any((e.get('path') or '').endswith('/tasks') for e in eps):
-                    js += "\nlet tasks = [];\nlet currentId = 1;\n"
+            # Para robustez, geramos servidor Express do zero a partir do contrato
+            if eps:
+                parts = []
+                parts.append("const express = require('express')")
+                parts.append("const cors = require('cors')")
+                parts.append("const app = express()")
+                parts.append("const PORT = process.env.PORT || 3000")
+                parts.append("app.use(cors())")
+                parts.append("app.options('*', cors())")
+                parts.append("app.use(express.json())")
+                parts.append("app.get('/health', (req,res)=>res.json({status:'ok'}))")
+                # estado em memória quando há /tasks
+                if any((e.get('path') or '').endswith('/tasks') for e in eps):
+                    parts.append("let tasks = []")
+                    parts.append("let currentId = 1")
                 for e in eps:
                     m = (e.get('method') or 'GET').lower()
                     p = e.get('path') or ''
-                    # normaliza caminho e aplica base_url se não presente
                     path = p if p.startswith('/') else '/' + p
                     if base_url and not path.startswith(base_url):
                         path_full = base_url + (path if path != '/' else '')
                     else:
                         path_full = path
-                    signature = f"app.{m}('{path_full}'"
-                    if signature in js:
-                        continue
                     if path_full.endswith('/tasks'):
                         if m == 'get':
-                            js += "\napp.get('/api/tasks', (req,res)=>res.json(tasks))\n"
+                            parts.append("app.get('/api/tasks', (req,res)=>res.json(tasks))")
                         elif m == 'post':
-                            js += "\napp.post('/api/tasks', (req,res)=>{ const { name } = req.body || {}; if(!name) return res.status(400).json({ error: 'Nome da tarefa é obrigatório' }); const t = { id: currentId++, name }; tasks.push(t); res.status(201).json(t); })\n"
+                            parts.append("app.post('/api/tasks', (req,res)=>{ const { name } = req.body || {}; if(!name) return res.status(400).json({ error: 'Nome da tarefa é obrigatório' }); const t = { id: currentId++, name }; tasks.push(t); res.status(201).json(t); })")
                         else:
-                            js += f"\napp.{m}('{path_full}', (req,res)=>res.json({{ ok: true }}))\n"
+                            parts.append(f"app.{m}('{path_full}', (req,res)=>res.json({{ ok: true }}))")
                     elif path_full.endswith('/tasks/:id'):
                         if m == 'put':
-                            js += "\napp.put('/api/tasks/:id', (req,res)=>{ const { id } = req.params; const { name } = req.body || {}; const t = tasks.find(x=>String(x.id)===String(id)); if(!t) return res.status(404).json({ error: 'Tarefa não encontrada' }); t.name = name ?? t.name; res.json(t); })\n"
+                            parts.append("app.put('/api/tasks/:id', (req,res)=>{ const { id } = req.params; const { name } = req.body || {}; const t = tasks.find(x=>String(x.id)===String(id)); if(!t) return res.status(404).json({ error: 'Tarefa não encontrada' }); t.name = name ?? t.name; res.json(t); })")
                         elif m == 'delete':
-                            js += "\napp.delete('/api/tasks/:id', (req,res)=>{ const { id } = req.params; const i = tasks.findIndex(x=>String(x.id)===String(id)); if(i<0) return res.status(404).json({ error: 'Tarefa não encontrada' }); tasks.splice(i,1); res.status(204).end(); })\n"
+                            parts.append("app.delete('/api/tasks/:id', (req,res)=>{ const { id } = req.params; const i = tasks.findIndex(x=>String(x.id)===String(id)); if(i<0) return res.status(404).json({ error: 'Tarefa não encontrada' }); tasks.splice(i,1); res.status(204).end(); })")
                         else:
-                            js += f"\napp.{m}('{path_full}', (req,res)=>res.json({{ ok: true }}))\n"
+                            parts.append(f"app.{m}('{path_full}', (req,res)=>res.json({{ ok: true }}))")
                     else:
-                        js += f"\napp.{m}('{path_full}', (req,res)=>res.json({{ ok: true }}))\n"
-                # Garante listen
-                if "app.listen(" not in js:
-                    if "process.env.PORT" not in js and "const PORT" not in js:
-                        js = "const PORT = process.env.PORT || 3000\n" + js
-                    js += "\napp.listen(process.env.PORT || PORT || 3000, ()=>console.log('Server on ' + (process.env.PORT || PORT || 3000)))\n"
-                zf.writestr("backend/src/index.js", js)
-            else:
-                if eps:
-                    parts = []
-                    parts.append("const express = require('express')")
-                    parts.append("const cors = require('cors')")
-                    parts.append("const app = express()")
-                    parts.append("const PORT = process.env.PORT || 3000")
-                    parts.append("app.use(cors())")
-                    parts.append("app.options('*', cors())")
-                    parts.append("app.use(express.json())")
-                    parts.append("app.get('/health', (req,res)=>res.json({status:'ok'}))")
-                    for e in eps:
-                        m = (e.get('method') or 'GET').lower()
-                        p = e.get('path') or ''
-                        path = p if p.startswith('/') else '/' + p
-                        if base_url and not path.startswith(base_url):
-                            path_full = base_url + (path if path != '/' else '')
-                        else:
-                            path_full = path
                         parts.append(f"app.{m}('{path_full}', (req,res)=>res.json({{ ok: true }}))")
-                    parts.append("app.listen(PORT, ()=>console.log('Server on ' + PORT))")
-                    zf.writestr("backend/src/index.js", "\n".join(parts))
-                else:
-                    try:
-                        resource = _infer_resource(task or "", front, back, qa)
-                    except Exception:
-                        resource = "users"
-                    zf.writestr("backend/src/index.js", _build_express_crud(resource))
+                parts.append("app.listen(PORT, ()=>console.log('Server on ' + PORT))")
+                zf.writestr("backend/src/index.js", "\n".join(parts))
+            else:
+                try:
+                    resource = _infer_resource(task or "", front, back, qa)
+                except Exception:
+                    resource = "users"
+                zf.writestr("backend/src/index.js", _build_express_crud(resource))
         elif preset == "spring":
             pom = f"""
 <project xmlns=\"http://maven.apache.org/POM/4.0.0\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd\">
@@ -1417,7 +1379,7 @@ spring:
 
         # Backend RAW e blocos com heurísticas (reutiliza lógica do build_project_zip)
         if back:
-            zf.writestr("backend/README.md", back)
+            zf.writestr("backend/BACK_RAW.md", back)
             back_blocks = _extract_code_blocks(back)
 
             # Detecta e registra contrato de API em docs/api_contract.json

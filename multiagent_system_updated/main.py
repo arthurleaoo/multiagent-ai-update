@@ -357,7 +357,8 @@ def generate_zip():
                 preset=preset,
                 project_name=project_name,
                 group_id=group_id,
-                contract=result.get("contract")
+                contract=result.get("contract"),
+                include_front=("front" in agents_to_run)
             )
         else:
             memzip = build_project_zip(
