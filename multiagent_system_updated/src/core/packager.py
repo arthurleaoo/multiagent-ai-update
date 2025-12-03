@@ -1,5 +1,6 @@
 import io
 import re
+import json
 from turtle import reset
 import zipfile
 from typing import Optional
@@ -981,6 +982,66 @@ f'- POST http://127.0.0.1:{api_port}/api/tasks Body: {{"task":"Nova tarefa"}}\n'
         )
         zf.writestr("README.md", top_readme_structured)
 
+        # Enriquecimento de contrato com schema (se ausente) e gravação em docs
+        def _infer_resource_name_from_endpoints(base: str, endpoints: list[dict]) -> str | None:
+            try:
+                for e in endpoints or []:
+                    p = (e or {}).get("path") or ""
+                    if p.startswith(base + "/"):
+                        rel = p[len(base):]
+                        if not rel.startswith("/"):
+                            rel = "/" + rel
+                        name = (rel[1:].split("/")[0]) or None
+                        if name:
+                            return name
+                return None
+            except Exception:
+                return None
+
+        def _derive_schema_from_contract(c: dict) -> list[dict]:
+            base = (c or {}).get("base_url") or "/api"
+            eps = (c or {}).get("endpoints") or []
+            name = _infer_resource_name_from_endpoints(base, eps) or "items"
+            schema: list[dict] = []
+            body_types: dict[str, str] = {}
+            try:
+                for e in eps:
+                    m = ((e or {}).get("method") or "GET").upper()
+                    p = (e or {}).get("path") or ""
+                    rel = p
+                    if p.startswith(base):
+                        rel = p[len(base):] or "/"
+                    if not rel.startswith("/"):
+                        rel = "/" + rel
+                    if m == "POST" and rel == f"/{name}":
+                        body = (e or {}).get("body") or {}
+                        for k, t in (body.items() if isinstance(body, dict) else []):
+                            body_types[str(k)] = str(t or "string")
+            except Exception:
+                pass
+            if body_types:
+                for k, t in body_types.items():
+                    ty = "string"
+                    tt = str(t).lower()
+                    if tt in ("int", "integer", "number", "float", "double"): ty = "number"
+                    elif tt in ("bool", "boolean"): ty = "boolean"
+                    schema.append({"name": k, "type": ty, "required": True})
+            else:
+                schema.append({"name": "name", "type": "string", "required": True})
+            return [{"name": name, "schema": schema}]
+
+        contract_enriched = dict(contract or {})
+        if not contract_enriched.get("resources"):
+            try:
+                contract_enriched["resources"] = _derive_schema_from_contract(contract_enriched)
+            except Exception:
+                contract_enriched["resources"] = [{"name": "items", "schema": [{"name": "name", "type": "string", "required": True}]}]
+        try:
+            zf.writestr("docs/api_contract.json", json.dumps(contract_enriched, ensure_ascii=False, indent=2))
+        except Exception:
+            pass
+        contract = contract_enriched
+
         # Frontend opcional, só quando solicitado
         if include_front:
             front_blocks = _extract_code_blocks(front)
@@ -1018,101 +1079,153 @@ f'- POST http://127.0.0.1:{api_port}/api/tasks Body: {{"task":"Nova tarefa"}}\n'
         feps = _fe_contract_endpoints(contract or {})
         base_front = _fe_base(contract or {}, "/api")
 
+        def _discover_front_resource(endpoints: list[dict]) -> dict | None:
+            for e in endpoints:
+                p = (e.get("path") or "").strip()
+                if not p:
+                    continue
+                rel = p
+                if rel.startswith(base_front):
+                    rel = rel[len(base_front):] or "/"
+                if not rel.startswith("/"):
+                    rel = "/" + rel
+                m = re.match(r"^/([a-zA-Z0-9_-]+)(?:/.*)?$", rel)
+                if m:
+                    name = m.group(1)
+                    return {"name": name}
+            return None
+
+        res_info = _discover_front_resource(feps)
+
+        def _path_matches(p: str, path: str) -> bool:
+            if not p:
+                return False
+            candidates = [path, f"{base_front}{path}"]
+            # variantes com parâmetros: :id, {id}, <id>
+            if path.endswith(":id"):
+                base = path[:-3]
+                candidates += [base + "{id}", base + "<id>", f"{base_front}{base}{{id}}", f"{base_front}{base}<id>"]
+            elif path.endswith("/{id}"):
+                base = path[:-5]
+                candidates += [base + "/:id", base + "/<id>", f"{base_front}{base}/:id", f"{base_front}{base}/<id>"]
+            elif path.endswith("/<id>"):
+                base = path[:-5]
+                candidates += [base + "/:id", base + "/{id}", f"{base_front}{base}/:id", f"{base_front}{base}/{id}"]
+            return any(p == c for c in candidates)
+
         def _ep_exists(method: str, path: str) -> bool:
             for e in feps:
                 m = (e.get("method") or "").upper()
-                p = e.get("path") or ""
-                if m == method.upper() and (p == path or p == f"{base_front}{path}"):
+                p = (e.get("path") or "").strip()
+                if m == method.upper() and _path_matches(p, path):
                     return True
             return False
 
-        has_tasks_list = _ep_exists("GET", "/tasks") if include_front else False
-        has_tasks_create = _ep_exists("POST", "/tasks") if include_front else False
-        has_tasks_update = _ep_exists("PUT", "/tasks/:id") if include_front else False
-        has_tasks_delete = _ep_exists("DELETE", "/tasks/:id") if include_front else False
-
-        if include_front and has_tasks_list and has_tasks_create and has_tasks_update and has_tasks_delete:
+        if include_front:
+            # A criação de index.html será feita após detectar o tipo de recurso (to‑do vs CRUD)
+            desired["styles.css"] = (
+                "body{font-family:Arial,Helvetica,sans-serif;padding:20px}"
+                "h1{margin-bottom:16px}"
+                ".form{margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap}"
+                ".item{display:flex;gap:8px;align-items:center;margin:8px 0;flex-wrap:wrap}"
+                ".item input,.item select{flex:1;padding:6px}"
+                ".item button{padding:6px 10px}"
+            )
+            api_base_default = f"http://127.0.0.1:{api_port}{base_front}"
+            schema_list = []
+            try:
+                resources = (contract or {}).get("resources") or []
+                chosen = None
+                for r in resources:
+                    rn = (r or {}).get("name")
+                    if (res_info or {}).get("name") and rn == (res_info or {}).get("name"):
+                        chosen = r
+                        break
+                    if chosen is None:
+                        chosen = r
+                schema_list = (chosen or {}).get("schema") or []
+            except Exception:
+                schema_list = []
+            schema_js = json.dumps(schema_list, ensure_ascii=False)
+            resource_name = (res_info or {"name":"tasks"}).get("name") or "tasks"
+            todo_names = {"tasks","todos","todo","tarefas"}
+            has_bool = any((isinstance(f, dict) and (f.get("type") == "boolean")) for f in (schema_list or []))
+            task_l = (task or "").lower()
+            crud_in_task = ("crud" in task_l)
+            # Dispara To-Do somente por termos específicos, não por "todos" em Português
+            todo_triggers = ("to-do" in task_l) or ("todo" in task_l) or ("to do" in task_l) or ("lista de tarefas" in task_l) or ("checklist" in task_l) or ("afazeres" in task_l)
+            is_todo_by_task = bool(todo_triggers and not crud_in_task)
+            is_todo = bool(has_bool or is_todo_by_task or ((resource_name in todo_names) and not crud_in_task))
+            title_res = resource_name.capitalize()
             desired["index.html"] = (
                 "<!DOCTYPE html>\n"
                 "<html lang=\"pt-BR\">\n"
                 "<head>\n"
                 "  <meta charset=\"UTF-8\" />\n"
                 "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n"
-                "  <title>CRUD de Tarefas</title>\n"
+                + (f"  <title>To-Do List de {title_res}</title>\n" if is_todo else f"  <title>CRUD de {title_res}</title>\n") +
                 "  <link rel=\"stylesheet\" href=\"styles.css\" />\n"
                 "</head>\n"
                 "<body>\n"
-                "  <h1>CRUD de Tarefas</h1>\n"
-                "  <div class=\"form\">\n"
-                "    <input id=\"new-name\" name=\"name\" placeholder=\"Nome da tarefa\" autocomplete=\"off\" aria-label=\"Nome da tarefa\" />\n"
-                "    <button id=\"add-btn\">Adicionar</button>\n"
-                "  </div>\n"
+                + (f"  <h1>To-Do List de {title_res}</h1>\n" if is_todo else f"  <h1>CRUD de {title_res}</h1>\n") +
+                "  <div class=\"form\" id=\"form\"></div>\n"
+                "  <button id=\"add-btn\">Adicionar</button>\n"
                 "  <div id=\"list\"></div>\n"
                 "  <script src=\"script.js\"></script>\n"
                 "</body>\n"
                 "</html>\n"
             )
-            desired["styles.css"] = (
-                "body{font-family:Arial,Helvetica,sans-serif;padding:20px}"
-                "h1{margin-bottom:16px}"
-                ".form{margin-bottom:12px}"
-                ".item{display:flex;gap:8px;align-items:center;margin:8px 0}"
-                ".item input{flex:1;padding:6px}"
-                ".item button{padding:6px 10px}"
-            )
-            api_base_default = f"http://127.0.0.1:{api_port}{base_front}"
-            desired["script.js"] = (
-                "const API_BASE=(function(){const p=new URLSearchParams(window.location.search);return window.API_BASE||p.get('api')||'"
-                + api_base_default + "';})();\n"
-                "const listEl=document.getElementById('list');\n"
-                "const addBtn=document.getElementById('add-btn');\n"
-                "const newName=document.getElementById('new-name');\n"
-                "async function loadTasks(){\n"
-                "  const r=await fetch(API_BASE+'/tasks');\n"
-                "  const data=await r.json();\n"
-                "  render(data);\n"
-                "}\n"
-                "function render(tasks){\n"
-                "  listEl.innerHTML='';\n"
-                "  for(const t of tasks){\n"
-                "    const row=document.createElement('div');\n"
-                "    row.className='item';\n"
-                "    const nameInput=document.createElement('input');\n"
-                "    nameInput.value=t.name||'';\n"
-                "    nameInput.name='name';\n"
-                "    nameInput.id='task-'+t.id;\n"
-                "    nameInput.placeholder='Nome';\n"
-                "    nameInput.autocomplete='off';\n"
-                "    nameInput.setAttribute('aria-label','Nome da tarefa');\n"
-                "    const saveBtn=document.createElement('button');\n"
-                "    saveBtn.textContent='Salvar';\n"
-                "    saveBtn.onclick=()=>updateTask(t.id,nameInput.value);\n"
-                "    const delBtn=document.createElement('button');\n"
-                "    delBtn.textContent='Excluir';\n"
-                "    delBtn.onclick=()=>deleteTask(t.id);\n"
-                "    row.appendChild(nameInput);\n"
-                "    row.appendChild(saveBtn);\n"
-                "    row.appendChild(delBtn);\n"
-                "    listEl.appendChild(row);\n"
-                "  }\n"
-                "}\n"
-                "async function addTask(){\n"
-                "  const name=(newName.value||'').trim();\n"
-                "  if(!name)return;\n"
-                "  const r=await fetch(API_BASE+'/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});\n"
-                "  if(r.ok){newName.value='';await loadTasks();} else { console.error('POST /tasks failed', r.status); }\n"
-                "}\n"
-                "async function updateTask(id,name){\n"
-                "  const r=await fetch(API_BASE+'/tasks/'+encodeURIComponent(id),{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});\n"
-                "  if(r.ok){await loadTasks();} else { console.error('PUT /tasks/'+id+' failed', r.status); }\n"
-                "}\n"
-                "async function deleteTask(id){\n"
-                "  const r=await fetch(API_BASE+'/tasks/'+encodeURIComponent(id),{method:'DELETE'});\n"
-                "  if(r.ok){await loadTasks();} else { console.error('DELETE /tasks/'+id+' failed', r.status); }\n"
-                "}\n"
-                "addBtn.onclick=addTask;\n"
-                "loadTasks();\n"
-            )
+            resource_name = (res_info or {"name":"tasks"}).get("name") or "tasks"
+            todo_names = {"tasks","todos","todo","tarefas"}
+            has_bool = any((isinstance(f, dict) and (f.get("type") == "boolean")) for f in (schema_list or []))
+            task_l = (task or "").lower()
+            crud_in_task = ("crud" in task_l)
+            todo_triggers = ("to-do" in task_l) or ("todo" in task_l) or ("to do" in task_l) or ("lista de tarefas" in task_l) or ("checklist" in task_l) or ("afazeres" in task_l)
+            is_todo_by_task = bool(todo_triggers and not crud_in_task)
+            is_todo = bool(has_bool or is_todo_by_task or ((resource_name in todo_names) and not crud_in_task))
+            if is_todo:
+                desired["script.js"] = (
+                    "const API_BASE=(function(){const p=new URLSearchParams(window.location.search);return window.API_BASE||p.get('api')||'"
+                    + api_base_default + "';})();\n"
+                    f"const RESOURCE='{resource_name}';\n"
+                    f"const SCHEMA={schema_js};\n"
+                    "const listEl=document.getElementById('list');\n"
+                    "const formEl=document.getElementById('form');\n"
+                    "const addBtn=document.getElementById('add-btn');\n"
+                    "function boolField(){ const f=(SCHEMA||[]).find(x=>x&&x.type==='boolean'); return (f&&f.name)||'done'; }\n"
+                    "function buildForm(){ formEl.innerHTML=''; const i=document.createElement('input'); i.type='text'; i.id='new-name'; i.placeholder='Nova tarefa'; i.autocomplete='off'; i.setAttribute('aria-label','Nova tarefa'); formEl.appendChild(i); }\n"
+                    "buildForm();\n"
+                    "function join(base, path){ const b=String(base||'').replace(/\\/+$/,''); const p=String(path||'').replace(/^\\+/,''); return b + '/' + p; }\n"
+                    "async function loadItems(){ try{ const r=await fetch(join(API_BASE, RESOURCE)); if(!r.ok) throw new Error('HTTP '+r.status); const data=await r.json(); const items = Array.isArray(data) ? data : (Array.isArray(data.items)?data.items:(Array.isArray(data.content)?data.content:[])); render(items); } catch(e){ console.error('GET failed', e); listEl.innerHTML='<div>API indisponível</div>'; } }\n"
+                    "function render(items){ listEl.innerHTML=''; const bf=boolField(); for(const t of items){ const rid=String(t.id ?? t._id ?? ''); const row=document.createElement('div'); row.className='item'; const chk=document.createElement('input'); chk.type='checkbox'; chk.checked=Boolean(t[bf]??false); chk.onchange=()=>toggleItem((t.id??t._id), chk.checked, bf); const span=document.createElement('span'); span.textContent=String(t.name ?? t.title ?? rid); if(chk.checked){ span.style.textDecoration='line-through'; span.style.opacity='0.7'; } const del=document.createElement('button'); del.textContent='Excluir'; del.onclick=()=>deleteItem((t.id??t._id)); row.appendChild(chk); row.appendChild(span); row.appendChild(del); listEl.appendChild(row); } }\n"
+                    "async function addItem(){ try{ const n=(document.getElementById('new-name').value||'').trim(); if(!n){ console.error('Campo name é obrigatório'); return; } const bf=boolField(); const body={ name:n }; body[bf]=false; const r=await fetch(join(API_BASE, RESOURCE),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); if(!r.ok) throw new Error('HTTP '+r.status); document.getElementById('new-name').value=''; await loadItems(); } catch(e){ console.error('POST failed', e); } }\n"
+                    "async function toggleItem(id,val,bf){ try{ const body={}; body[bf]=Boolean(val); const r=await fetch(join(API_BASE, RESOURCE + '/' + encodeURIComponent(id)),{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); if(!r.ok) throw new Error('HTTP '+r.status); await loadItems(); } catch(e){ console.error('PUT failed', e); } }\n"
+                    "async function deleteItem(id){ try{ const r=await fetch(join(API_BASE, RESOURCE + '/' + encodeURIComponent(id)),{method:'DELETE'}); if(!r.ok) throw new Error('HTTP '+r.status); await loadItems(); } catch(e){ console.error('DELETE failed', e); } }\n"
+                    "addBtn.onclick=addItem;\n"
+                    "loadItems();\n"
+                )
+            else:
+                desired["script.js"] = (
+                    "const API_BASE=(function(){const p=new URLSearchParams(window.location.search);return window.API_BASE||p.get('api')||'"
+                    + api_base_default + "';})();\n"
+                    f"const RESOURCE='{resource_name}';\n"
+                    f"const SCHEMA={schema_js};\n"
+                    "const listEl=document.getElementById('list');\n"
+                    "const formEl=document.getElementById('form');\n"
+                    "const addBtn=document.getElementById('add-btn');\n"
+                    "function buildForm(){ const defs=(SCHEMA&&SCHEMA.length)?SCHEMA:[{name:'name',type:'string',required:true}]; formEl.innerHTML=''; for(const f of defs){ let input; if(f.type==='number'){ input=document.createElement('input'); input.type='number'; } else if(f.type==='boolean'){ input=document.createElement('input'); input.type='checkbox'; } else if(f.type==='enum' && Array.isArray(f.values)){ input=document.createElement('select'); for(const v of f.values){ const o=document.createElement('option'); o.value=String(v); o.textContent=String(v); input.appendChild(o);} } else { input=document.createElement('input'); input.type='text'; } input.id='new-'+f.name; input.name=f.name; input.placeholder=f.name; input.autocomplete='off'; input.setAttribute('aria-label',f.name); formEl.appendChild(input);} }\n"
+                    "buildForm();\n"
+                    "function join(base, path){ const b=String(base||'').replace(/\\/+$/,''); const p=String(path||'').replace(/^\\+/,''); return b + '/' + p; }\n"
+                    "async function loadItems(){ try{ const r=await fetch(join(API_BASE, RESOURCE)); if(!r.ok) throw new Error('HTTP '+r.status); const data=await r.json(); const items = Array.isArray(data) ? data : (Array.isArray(data.items)?data.items:(Array.isArray(data.content)?data.content:[])); render(items); } catch(e){ console.error('GET failed', e); listEl.innerHTML='<div>API indisponível</div>'; } }\n"
+                    "function render(items){ listEl.innerHTML=''; const defs=(SCHEMA&&SCHEMA.length)?SCHEMA:[{name:'name',type:'string',required:true}]; for(const t of items){ const row=document.createElement('div'); row.className='item'; const rid=String(t.id ?? t._id ?? ''); for(const f of defs){ let input; if(f.type==='number'){ input=document.createElement('input'); input.type='number'; input.value=(t[f.name]??''); } else if(f.type==='boolean'){ input=document.createElement('input'); input.type='checkbox'; input.checked=Boolean(t[f.name]??false); } else if(f.type==='enum' && Array.isArray(f.values)){ input=document.createElement('select'); for(const v of f.values){ const o=document.createElement('option'); o.value=String(v); o.textContent=String(v); if(String(t[f.name])===String(v)) o.selected=true; input.appendChild(o);} } else { input=document.createElement('input'); input.type='text'; input.value=String(t[f.name]??''); } input.id='row-'+rid+'-'+f.name; input.name=f.name; input.placeholder=f.name; input.autocomplete='off'; input.setAttribute('aria-label',f.name); row.appendChild(input);} const saveBtn=document.createElement('button'); saveBtn.textContent='Salvar'; saveBtn.onclick=()=>{ const body=collectRow(rid); updateItem((t.id ?? t._id),body); }; const delBtn=document.createElement('button'); delBtn.textContent='Excluir'; delBtn.onclick=()=>deleteItem((t.id ?? t._id)); row.appendChild(saveBtn); row.appendChild(delBtn); listEl.appendChild(row);} }\n"
+                    "function collectNew(){ const defs=(SCHEMA&&SCHEMA.length)?SCHEMA:[{name:'name',type:'string',required:true}]; const body={}; for(const f of defs){ const el=document.getElementById('new-'+f.name); if(!el) continue; if(f.type==='boolean'){ body[f.name]=Boolean(el.checked); } else if(f.type==='number'){ const v=String(el.value||''); body[f.name]=v?Number(v):null; } else { body[f.name]=String(el.value||''); } } for(const f of defs){ if(f.required && (body[f.name]===undefined || body[f.name]===null || body[f.name]==='')){ return {error:'Campo '+f.name+' é obrigatório'}; } } return body; }\n"
+                    "function collectRow(rid){ const defs=(SCHEMA&&SCHEMA.length)?SCHEMA:[{name:'name',type:'string',required:true}]; const body={}; for(const f of defs){ const el=document.getElementById('row-'+rid+'-'+f.name); if(!el) continue; if(f.type==='boolean'){ body[f.name]=Boolean(el.checked); } else if(f.type==='number'){ const v=String(el.value||''); body[f.name]=v?Number(v):null; } else { body[f.name]=String(el.value||''); } } return body; }\n"
+                    "async function addItem(){ try{ const body=collectNew(); if(body.error){ console.error(body.error); return; } const r=await fetch(join(API_BASE, RESOURCE),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); if(!r.ok) throw new Error('HTTP '+r.status); formEl.querySelectorAll('input,select').forEach(e=>{if(e.type==='checkbox')e.checked=false; else e.value='';}); await loadItems(); } catch(e){ console.error('POST failed', e); } }\n"
+                    "async function updateItem(id,body){ try{ const r=await fetch(join(API_BASE, RESOURCE + '/' + encodeURIComponent(id)),{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); if(!r.ok) throw new Error('HTTP '+r.status); await loadItems(); } catch(e){ console.error('PUT failed', e); } }\n"
+                    "async function deleteItem(id){ try{ const r=await fetch(join(API_BASE, RESOURCE + '/' + encodeURIComponent(id)),{method:'DELETE'}); if(!r.ok) throw new Error('HTTP '+r.status); await loadItems(); } catch(e){ console.error('DELETE failed', e); } }\n"
+                    "addBtn.onclick=addItem;\n"
+                    "loadItems();\n"
+                )
         if include_front:
             for fn, content in desired.items():
                 if content:
@@ -1151,21 +1264,91 @@ f'- POST http://127.0.0.1:{api_port}/api/tasks Body: {{"task":"Nova tarefa"}}\n'
             )
             if not re.search(r"backend/app/main\.py", back or "", re.IGNORECASE):
                 if eps:
+                    # descobre recurso principal
+                    try:
+                        first_path = None
+                        for _e in eps:
+                            _p = (_e.get('path') or '')
+                            if _p.startswith(base_url + '/'):
+                                first_path = _p
+                                break
+                        if first_path:
+                            rel0 = first_path[len(base_url):]
+                            if not rel0.startswith('/'):
+                                rel0 = '/' + rel0
+                            resource_name = (rel0[1:].split('/')[0]) or 'items'
+                        else:
+                            resource_name = 'items'
+                    except Exception:
+                        resource_name = 'items'
+
                     lines = []
                     lines.append("from flask import Blueprint, jsonify, request")
                     lines.append(f"main = Blueprint('main', __name__, url_prefix='{base_url}')")
+                    try:
+                        _schema = None
+                        _resources = (contract or {}).get("resources") or []
+                        for _r in _resources:
+                            if (_r or {}).get("name") == resource_name:
+                                _schema = (_r or {}).get("schema")
+                                break
+                            if _schema is None:
+                                _schema = (_r or {}).get("schema")
+                        _required = [ (f or {}).get("name") for f in (_schema or []) if (f or {}).get("required") ]
+                    except Exception:
+                        _required = []
+                    # Sanitiza campos obrigatórios
+                    valid_required = [x for x in (_required or []) if isinstance(x, str) and re.match(r"^[A-Za-z][A-Za-z0-9_]{0,30}$", x)]
+                    if not valid_required:
+                        valid_required = ['name']
+                    lines.append("REQUIRED = " + json.dumps(valid_required, ensure_ascii=False))
+                    lines.append("items = []")
+                    lines.append("current_id = 1")
                     for e in eps:
                         p = e.get("path") or ""
-                        m = e.get("method") or "GET"
+                        m = (e.get("method") or "GET").upper()
                         rel = p
                         if p.startswith(base_url):
                             rel = p[len(base_url):] or "/"
                         if not rel.startswith("/"):
                             rel = "/" + rel
-                        func = f"ep_{m.lower()}_{re.sub(r'[^a-z0-9]+','_', rel.strip('/')).strip('_') or 'root'}"
-                        lines.append(f"@main.route('{rel}', methods=['{m}'])")
-                        lines.append(f"def {func}():")
-                        lines.append("    return jsonify({'ok': True})")
+                        coll_rel = f"/{resource_name}"
+                        item_variants = {f"/{resource_name}/:id", f"/{resource_name}/{{id}}", f"/{resource_name}/<id>"}
+                        rel_flask = rel.replace("/:id", "/<id>").replace("/{id}", "/<id>")
+                        func = f"ep_{m.lower()}_{re.sub(r'[^a-z0-9]+','_', rel_flask.strip('/')).strip('_') or 'root'}"
+                        lines.append(f"@main.route('{rel_flask}', methods=['{m}'])")
+                        if rel == coll_rel and m == "GET":
+                            lines.append(f"def {func}():")
+                            lines.append("    return jsonify(items)")
+                        elif rel == coll_rel and m == "POST":
+                            lines.append(f"def {func}():")
+                            lines.append("    data = (request.get_json(silent=True) or {})")
+                            lines.append("    for k in REQUIRED:\n        val = data.get(k)\n        if val is None or val == '':\n            return jsonify({'error': f'Campo {k} é obrigatório'}), 400")
+                            lines.append("    it = {'id': current_id}")
+                            lines.append("    for k, v in data.items():\n        if k != 'id':\n            it[k] = v")
+                            lines.append("    if it.get('name') is None and it.get('title') is not None:\n        it['name'] = it.get('title')")
+                            lines.append("    current_id += 1")
+                            lines.append("    items.append(it)")
+                            lines.append("    return jsonify(it), 201")
+                        elif rel in item_variants and m == "PUT":
+                            lines.append(f"def {func}(id):")
+                            lines.append("    data = (request.get_json(silent=True) or {})")
+                            lines.append("    for it in items:")
+                            lines.append("        if str(it.get('id')) == str(id):")
+                            lines.append("            for k, v in data.items():\n                if k != 'id':\n                    it[k] = v")
+                            lines.append("            if data.get('name') is None and data.get('title') is not None:\n                it['name'] = data.get('title')")
+                            lines.append("            return jsonify(it)")
+                            lines.append("    return jsonify({'error': 'Item não encontrado'}), 404")
+                        elif rel in item_variants and m == "DELETE":
+                            lines.append(f"def {func}(id):")
+                            lines.append("    for i, it in enumerate(items):")
+                            lines.append("        if str(it.get('id')) == str(id):")
+                            lines.append("            items.pop(i)")
+                            lines.append("            return ('', 204)")
+                            lines.append("    return jsonify({'error': 'Item não encontrado'}), 404")
+                        else:
+                            lines.append(f"def {func}():")
+                            lines.append("    return jsonify({'ok': True})")
                     zf.writestr("backend/app/main.py", "\n".join(lines))
                 else:
                     zf.writestr(
@@ -1186,10 +1369,47 @@ f'- POST http://127.0.0.1:{api_port}/api/tasks Body: {{"task":"Nova tarefa"}}\n'
                 parts.append("app.options('*', cors())")
                 parts.append("app.use(express.json())")
                 parts.append("app.get('/health', (req,res)=>res.json({status:'ok'}))")
-                # estado em memória quando há /tasks
-                if any((e.get('path') or '').endswith('/tasks') for e in eps):
-                    parts.append("let tasks = []")
-                    parts.append("let currentId = 1")
+                # descobre recurso principal (Python) e injeta como constante JS
+                try:
+                    first_path = None
+                    for _e in eps:
+                        _p = (_e.get('path') or '')
+                        if _p.startswith(base_url + '/'):
+                            first_path = _p
+                            break
+                    if first_path:
+                        rel = first_path[len(base_url):]
+                        if not rel.startswith('/'):
+                            rel = '/' + rel
+                        resource_name = (rel[1:].split('/')[0]) or 'tasks'
+                    else:
+                        resource_name = 'tasks'
+                except Exception:
+                    resource_name = 'tasks'
+                parts.append("const RESOURCE = '" + resource_name + "'")
+                try:
+                    _schema = None
+                    _resources = (contract or {}).get("resources") or []
+                    for _r in _resources:
+                        if (_r or {}).get("name") == resource_name:
+                            _schema = (_r or {}).get("schema")
+                            break
+                        if _schema is None:
+                            _schema = (_r or {}).get("schema")
+                    _required = [ (f or {}).get("name") for f in (_schema or []) if (f or {}).get("required") ]
+                except Exception:
+                    _required = []
+                # Sanitiza campos obrigatórios: mantém apenas nomes alfanuméricos/underscore; fallback para ['name']
+                valid_required = [x for x in (_required or []) if isinstance(x, str) and re.match(r"^[A-Za-z][A-Za-z0-9_]{0,30}$", x)]
+                if not valid_required:
+                    valid_required = ['name']
+                parts.append("const REQUIRED = " + json.dumps(valid_required, ensure_ascii=False))
+                parts.append("let items = []")
+                parts.append("let currentId = 1")
+                has_get_coll = False
+                has_post_coll = False
+                has_put_item = False
+                has_delete_item = False
                 for e in eps:
                     m = (e.get('method') or 'GET').lower()
                     p = e.get('path') or ''
@@ -1198,22 +1418,50 @@ f'- POST http://127.0.0.1:{api_port}/api/tasks Body: {{"task":"Nova tarefa"}}\n'
                         path_full = base_url + (path if path != '/' else '')
                     else:
                         path_full = path
-                    if path_full.endswith('/tasks'):
+                    # normaliza caminhos do recurso principal
+                    coll = f"{base_url}/" + resource_name
+                    item = f"{base_url}/" + resource_name + "/:id"
+                    if path_full == coll:
                         if m == 'get':
-                            parts.append("app.get('/api/tasks', (req,res)=>res.json(tasks))")
+                            parts.append("app.get('" + coll + "', (req,res)=>res.json(items))")
+                            has_get_coll = True
                         elif m == 'post':
-                            parts.append("app.post('/api/tasks', (req,res)=>{ const { name } = req.body || {}; if(!name) return res.status(400).json({ error: 'Nome da tarefa é obrigatório' }); const t = { id: currentId++, name }; tasks.push(t); res.status(201).json(t); })")
+                            parts.append("app.post('" + coll + "', (req,res)=>{ const body = req.body || {}; for(const k of REQUIRED){ if(body[k]===undefined || body[k]===null || body[k]===''){ return res.status(400).json({ error: 'Campo '+k+' é obrigatório' }); } } const it = { id: currentId++ }; for(const k in body){ if(k!=='id') it[k]=body[k]; } if(it.name===undefined && it.title!==undefined){ it.name=it.title; } items.push(it); res.status(201).json(it); })")
+                            has_post_coll = True
                         else:
                             parts.append(f"app.{m}('{path_full}', (req,res)=>res.json({{ ok: true }}))")
-                    elif path_full.endswith('/tasks/:id'):
+                    elif path_full == item:
                         if m == 'put':
-                            parts.append("app.put('/api/tasks/:id', (req,res)=>{ const { id } = req.params; const { name } = req.body || {}; const t = tasks.find(x=>String(x.id)===String(id)); if(!t) return res.status(404).json({ error: 'Tarefa não encontrada' }); t.name = name ?? t.name; res.json(t); })")
+                            parts.append("app.put('" + item + "', (req,res)=>{ const { id } = req.params; const body = req.body || {}; const t = items.find(x=>String(x.id)===String(id)); if(!t) return res.status(404).json({ error: 'Item não encontrado' }); for(const k in body){ if(k!=='id') t[k]=body[k]; } if(body.name===undefined && body.title!==undefined){ t.name=body.title; } res.json(t); })")
+                            has_put_item = True
                         elif m == 'delete':
-                            parts.append("app.delete('/api/tasks/:id', (req,res)=>{ const { id } = req.params; const i = tasks.findIndex(x=>String(x.id)===String(id)); if(i<0) return res.status(404).json({ error: 'Tarefa não encontrada' }); tasks.splice(i,1); res.status(204).end(); })")
+                            parts.append("app.delete('" + item + "', (req,res)=>{ const { id } = req.params; const i = items.findIndex(x=>String(x.id)===String(id)); if(i<0) return res.status(404).json({ error: 'Item não encontrado' }); items.splice(i,1); res.status(204).end(); })")
+                            has_delete_item = True
                         else:
                             parts.append(f"app.{m}('{path_full}', (req,res)=>res.json({{ ok: true }}))")
                     else:
                         parts.append(f"app.{m}('{path_full}', (req,res)=>res.json({{ ok: true }}))")
+                coll2 = f"{base_url}/" + resource_name
+                item2 = coll2 + ":id"
+                tl = (task or "").lower()
+                crud_in_task = ("crud" in tl)
+                # Termos que indicam claramente To-Do
+                todo_triggers = ("to-do" in tl) or ("todo" in tl) or ("to do" in tl) or ("lista de tarefas" in tl) or ("checklist" in tl) or ("afazeres" in tl)
+                is_todo_expr = (((resource_name.lower() in ("tasks","todos","todo","tarefas")) and not crud_in_task) or (todo_triggers and not crud_in_task))
+                if not has_get_coll:
+                    parts.append("app.get('" + coll2 + "', (req,res)=>res.json(items))")
+                if not has_post_coll:
+                    if is_todo_expr:
+                        parts.append("app.post('" + coll2 + "', (req,res)=>{ const body = req.body || {}; for(const k of REQUIRED){ if(body[k]===undefined || body[k]===null || body[k]===''){ return res.status(400).json({ error: 'Campo '+k+' é obrigatório' }); } } const it = { id: currentId++, name: String(body.name||'') }; it.done = body.done===undefined ? false : !!body.done; items.push(it); res.status(201).json(it); })")
+                    else:
+                        parts.append("app.post('" + coll2 + "', (req,res)=>{ const body = req.body || {}; for(const k of REQUIRED){ if(body[k]===undefined || body[k]===null || body[k]===''){ return res.status(400).json({ error: 'Campo '+k+' é obrigatório' }); } } const it = { id: currentId++ }; for(const k in body){ if(k!=='id') it[k]=body[k]; } if(it.name===undefined && it.title!==undefined){ it.name=it.title; } items.push(it); res.status(201).json(it); })")
+                if not has_put_item:
+                    if is_todo_expr:
+                        parts.append("app.put('" + item2 + "', (req,res)=>{ const id = String((req.params.id||'')).replace(/^\/+|\/+$/g,''); const body = req.body || {}; const t = items.find(x=>String(x.id)===id); if(!t) return res.status(404).json({ error: 'Item não encontrado' }); if(body.name!==undefined){ t.name=String(body.name||''); } if(body.done!==undefined){ t.done=!!body.done; } res.json(t); })")
+                    else:
+                        parts.append("app.put('" + item2 + "', (req,res)=>{ const { id } = req.params; const body = req.body || {}; const t = items.find(x=>String(x.id)===String(id)); if(!t) return res.status(404).json({ error: 'Item não encontrado' }); for(const k in body){ if(k!=='id') t[k]=body[k]; } if(body.name===undefined && body.title!==undefined){ t.name=body.title; } res.json(t); })")
+                if not has_delete_item:
+                    parts.append("app.delete('" + item2 + "', (req,res)=>{ const { id } = req.params; const i = items.findIndex(x=>String(x.id)===String(id)); if(i<0) return res.status(404).json({ error: 'Item não encontrado' }); items.splice(i,1); res.status(204).end(); })")
                 parts.append("app.listen(PORT, ()=>console.log('Server on ' + PORT))")
                 zf.writestr("backend/src/index.js", "\n".join(parts))
             else:
@@ -1311,14 +1559,51 @@ spring:
             if eps:
                 base = base_url
                 cls = "ApiController"
+                # descobre recurso principal
+                try:
+                    first_path = None
+                    for _e in eps:
+                        _p = (_e.get('path') or '')
+                        if _p.startswith(base + '/'):
+                            first_path = _p
+                            break
+                    if first_path:
+                        rel0 = first_path[len(base):]
+                        if not rel0.startswith('/'):
+                            rel0 = '/' + rel0
+                        resource_name = (rel0[1:].split('/')[0]) or 'items'
+                    else:
+                        resource_name = 'items'
+                except Exception:
+                    resource_name = 'items'
                 lines = []
                 lines.append(f"package {group_id}.controller;")
                 lines.append("import org.springframework.web.bind.annotation.*;")
-                lines.append("import java.util.Map;")
+                lines.append("import java.util.*;")
                 lines.append("@RestController")
                 lines.append("@CrossOrigin(origins = \"*\")")
                 lines.append(f"@RequestMapping(\"{base}\")")
                 lines.append(f"public class {cls} {{")
+                try:
+                    _schema = None
+                    _resources = (contract or {}).get("resources") or []
+                    for _r in _resources:
+                        if (_r or {}).get("name") == resource_name:
+                            _schema = (_r or {}).get("schema")
+                            break
+                        if _schema is None:
+                            _schema = (_r or {}).get("schema")
+                    _required = [ (f or {}).get("name") for f in (_schema or []) if (f or {}).get("required") ]
+                except Exception:
+                    _required = []
+                # Sanitiza campos obrigatórios
+                valid_required = [x for x in (_required or []) if isinstance(x, str) and re.match(r"^[A-Za-z][A-Za-z0-9_]{0,30}$", x)]
+                if not valid_required:
+                    valid_required = ['name']
+                req_java = ", ".join(["\"" + x + "\"" for x in valid_required])
+                lines.append(f"  private java.util.List<String> REQUIRED = java.util.List.of({req_java});")
+                lines.append("  private List<Map<String,Object>> items = new ArrayList<>();")
+                lines.append("  private int currentId = 1;")
                 for e in eps:
                     m = (e.get('method') or 'GET').upper()
                     p = e.get('path') or ''
@@ -1327,18 +1612,39 @@ spring:
                         rel = p[len(base):] or "/"
                     if not rel.startswith("/"):
                         rel = "/" + rel
-                    if m == "GET":
-                        ann = "GetMapping"
-                    elif m == "POST":
-                        ann = "PostMapping"
-                    elif m == "PUT":
-                        ann = "PutMapping"
-                    elif m == "DELETE":
-                        ann = "DeleteMapping"
+                    coll_rel = f"/{resource_name}"
+                    item_variants = {f"/{resource_name}/:id", f"/{resource_name}/{{id}}", f"/{resource_name}/<id>"}
+                    spring_rel = rel.replace("/:id", "/{id}").replace("/<id>", "/{id}")
+                    func = f"ep_{m.lower()}_{re.sub(r'[^a-z0-9]+','_', spring_rel.strip('/')).strip('_') or 'root'}"
+                    if rel == coll_rel and m == "GET":
+                        lines.append(f"  @GetMapping(\"{coll_rel}\")")
+                        lines.append(f"  public List<Map<String,Object>> {func}() {{ return items; }}")
+                    elif rel == coll_rel and m == "POST":
+                        lines.append(f"  @PostMapping(\"{coll_rel}\")")
+                        lines.append(f"  public Map<String,Object> {func}(@RequestBody Map<String,Object> body) {{")
+                        lines.append("    for(String k : REQUIRED){ Object v = body.get(k); if(v == null || String.valueOf(v).isEmpty()){ return Map.of(\"error\", \"Campo "+k+" é obrigatório\"); } }")
+                        lines.append("    Map<String,Object> it = new HashMap<>();")
+                        lines.append("    it.put(\"id\", currentId++);")
+                        lines.append("    for(Map.Entry<String,Object> e : body.entrySet()){ if(!\"id\".equals(e.getKey())) it.put(e.getKey(), e.getValue()); }")
+                        lines.append("    if(it.get(\"name\") == null && it.get(\"title\") != null){ it.put(\"name\", String.valueOf(it.get(\"title\"))); }")
+                        lines.append("    items.add(it);")
+                        lines.append("    return it;")
+                        lines.append("  }")
+                    elif rel in item_variants and m == "PUT":
+                        lines.append(f"  @PutMapping(\"{spring_rel}\")")
+                        lines.append(f"  public Map<String,Object> {func}(@PathVariable String id, @RequestBody Map<String,Object> body) {{")
+                        lines.append("    for(Map<String,Object> it : items){ if(String.valueOf(it.get(\"id\")).equals(String.valueOf(id))){ for(Map.Entry<String,Object> e : body.entrySet()){ if(!\"id\".equals(e.getKey())) it.put(e.getKey(), e.getValue()); } if(body.get(\"name\") == null && body.get(\"title\") != null){ it.put(\"name\", String.valueOf(body.get(\"title\"))); } return it; } }")
+                        lines.append("    return Map.of(\"error\", \"Item não encontrado\");")
+                        lines.append("  }")
+                    elif rel in item_variants and m == "DELETE":
+                        lines.append(f"  @DeleteMapping(\"{spring_rel}\")")
+                        lines.append(f"  public Map<String,Object> {func}(@PathVariable String id) {{")
+                        lines.append("    for(int i=0;i<items.size();i++){ Map<String,Object> it = items.get(i); if(String.valueOf(it.get(\"id\")).equals(String.valueOf(id))){ items.remove(i); return Map.of(\"ok\", true); } }")
+                        lines.append("    return Map.of(\"error\", \"Item não encontrado\");")
+                        lines.append("  }")
                     else:
-                        ann = "RequestMapping"
-                    lines.append(f"  @{ann}(\"{rel}\")")
-                    lines.append(f"  public Map<String,Object> ep_{m.lower()}_{re.sub(r'[^a-z0-9]+','_', rel.strip('/')).strip('_') or 'root'}() {{ return Map.of(\"ok\", true); }}")
+                        lines.append(f"  @RequestMapping(\"{spring_rel}\")")
+                        lines.append(f"  public Map<String,Object> {func}() {{ return Map.of(\"ok\", true); }}")
                 lines.append("}")
                 zf.writestr(f"backend/src/main/java/{ctrl_pkg_path}/{cls}.java", "\n".join(lines))
             else:
