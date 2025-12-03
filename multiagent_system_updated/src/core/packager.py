@@ -156,7 +156,13 @@ def _sanitize_express_js(content: str) -> str:
         if re.search(r"\b(app|server)\s*\.\s*listen\s*\(", l):
             continue
         out_lines.append(ln)
-    return "\n".join(out_lines)
+    sanitized = "\n".join(out_lines)
+    # Corrige possíveis '}' sobrando causados por remoção do bloco require.main
+    # Remove chaves de fechamento soltas no final do arquivo
+    while sanitized.rstrip().endswith("}") and sanitized.count("}") > sanitized.count("{"):
+        sanitized = sanitized.rstrip()
+        sanitized = sanitized[:-1]
+    return sanitized
 
 def _sanitize_front_js(content: str) -> str:
     """Sanitiza arquivos de frontend para evitar erros ao iterar listas.
@@ -921,7 +927,7 @@ Testes rápidos de API (Flask):
     return mem
 
 
-def build_structured_zip(task: str, language: str, front: str, back: str, qa: str, preset: str = "flask", project_name: str = "projeto", group_id: str = "com.example") -> io.BytesIO:
+def build_structured_zip(task: str, language: str, front: str, back: str, qa: str, preset: str = "flask", project_name: str = "projeto", group_id: str = "com.example", contract: dict | None = None) -> io.BytesIO:
     """
     Gera um ZIP com estrutura de projeto completa baseada em 'preset':
       - flask: backend Python/Flask
@@ -990,11 +996,147 @@ f'- POST http://127.0.0.1:{api_port}/api/tasks Body: {{"task":"Nova tarefa"}}\n'
         # Pós-processa para garantir API_BASE e fallbacks conforme preset
         default_port = 5001 if preset == "flask" else (3000 if preset == "express" else 8080)
         desired = _postprocess_front_files(desired, base_url_hint="/api", default_port=default_port)
+
+        def _fe_contract_endpoints(c: dict) -> list[dict]:
+            arr: list[dict] = []
+            if isinstance(c, dict):
+                for e in c.get("endpoints", []) or []:
+                    m = ((e or {}).get("method") or "GET").upper()
+                    p = ((e or {}).get("path") or "").strip()
+                    if p:
+                        arr.append({"method": m, "path": p})
+            return arr
+
+        def _fe_base(c: dict, default: str) -> str:
+            b = (c or {}).get("base_url") or default
+            b = b if isinstance(b, str) else default
+            if not b.startswith("/"):
+                b = "/" + b
+            return b
+
+        feps = _fe_contract_endpoints(contract or {})
+        base_front = _fe_base(contract or {}, "/api")
+
+        def _ep_exists(method: str, path: str) -> bool:
+            for e in feps:
+                m = (e.get("method") or "").upper()
+                p = e.get("path") or ""
+                if m == method.upper() and (p == path or p == f"{base_front}{path}"):
+                    return True
+            return False
+
+        has_tasks_list = _ep_exists("GET", "/tasks")
+        has_tasks_create = _ep_exists("POST", "/tasks")
+        has_tasks_update = _ep_exists("PUT", "/tasks/:id")
+        has_tasks_delete = _ep_exists("DELETE", "/tasks/:id")
+
+        if has_tasks_list and has_tasks_create and has_tasks_update and has_tasks_delete:
+            desired["index.html"] = (
+                "<!DOCTYPE html>\n"
+                "<html lang=\"pt-BR\">\n"
+                "<head>\n"
+                "  <meta charset=\"UTF-8\" />\n"
+                "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n"
+                "  <title>CRUD de Tarefas</title>\n"
+                "  <link rel=\"stylesheet\" href=\"styles.css\" />\n"
+                "</head>\n"
+                "<body>\n"
+                "  <h1>CRUD de Tarefas</h1>\n"
+                "  <div class=\"form\">\n"
+                "    <input id=\"new-name\" name=\"name\" placeholder=\"Nome da tarefa\" autocomplete=\"off\" aria-label=\"Nome da tarefa\" />\n"
+                "    <button id=\"add-btn\">Adicionar</button>\n"
+                "  </div>\n"
+                "  <div id=\"list\"></div>\n"
+                "  <script src=\"script.js\"></script>\n"
+                "</body>\n"
+                "</html>\n"
+            )
+            desired["styles.css"] = (
+                "body{font-family:Arial,Helvetica,sans-serif;padding:20px}"
+                "h1{margin-bottom:16px}"
+                ".form{margin-bottom:12px}"
+                ".item{display:flex;gap:8px;align-items:center;margin:8px 0}"
+                ".item input{flex:1;padding:6px}"
+                ".item button{padding:6px 10px}"
+            )
+            api_base_default = f"http://127.0.0.1:{api_port}{base_front}"
+            desired["script.js"] = (
+                "const API_BASE=(function(){const p=new URLSearchParams(window.location.search);return window.API_BASE||p.get('api')||'"
+                + api_base_default + "';})();\n"
+                "const listEl=document.getElementById('list');\n"
+                "const addBtn=document.getElementById('add-btn');\n"
+                "const newName=document.getElementById('new-name');\n"
+                "async function loadTasks(){\n"
+                "  const r=await fetch(API_BASE+'/tasks');\n"
+                "  const data=await r.json();\n"
+                "  render(data);\n"
+                "}\n"
+                "function render(tasks){\n"
+                "  listEl.innerHTML='';\n"
+                "  for(const t of tasks){\n"
+                "    const row=document.createElement('div');\n"
+                "    row.className='item';\n"
+                "    const nameInput=document.createElement('input');\n"
+                "    nameInput.value=t.name||'';\n"
+                "    nameInput.name='name';\n"
+                "    nameInput.id='task-'+t.id;\n"
+                "    nameInput.placeholder='Nome';\n"
+                "    nameInput.autocomplete='off';\n"
+                "    nameInput.setAttribute('aria-label','Nome da tarefa');\n"
+                "    const saveBtn=document.createElement('button');\n"
+                "    saveBtn.textContent='Salvar';\n"
+                "    saveBtn.onclick=()=>updateTask(t.id,nameInput.value);\n"
+                "    const delBtn=document.createElement('button');\n"
+                "    delBtn.textContent='Excluir';\n"
+                "    delBtn.onclick=()=>deleteTask(t.id);\n"
+                "    row.appendChild(nameInput);\n"
+                "    row.appendChild(saveBtn);\n"
+                "    row.appendChild(delBtn);\n"
+                "    listEl.appendChild(row);\n"
+                "  }\n"
+                "}\n"
+                "async function addTask(){\n"
+                "  const name=(newName.value||'').trim();\n"
+                "  if(!name)return;\n"
+                "  const r=await fetch(API_BASE+'/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});\n"
+                "  if(r.ok){newName.value='';await loadTasks();}\n"
+                "}\n"
+                "async function updateTask(id,name){\n"
+                "  const r=await fetch(API_BASE+'/tasks/'+encodeURIComponent(id),{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});\n"
+                "  if(r.ok){await loadTasks();}\n"
+                "}\n"
+                "async function deleteTask(id){\n"
+                "  const r=await fetch(API_BASE+'/tasks/'+encodeURIComponent(id),{method:'DELETE'});\n"
+                "  if(r.ok){await loadTasks();}\n"
+                "}\n"
+                "addBtn.onclick=addTask;\n"
+                "loadTasks();\n"
+            )
         for fn, content in desired.items():
             if content:
                 zf.writestr(f"frontend/{fn}", content)
         if front:
             zf.writestr("frontend/FRONT_RAW.md", front)
+
+        def _contract_endpoints(c: dict) -> list[dict]:
+            eps: list[dict] = []
+            if isinstance(c, dict):
+                for e in c.get("endpoints", []) or []:
+                    m = ((e or {}).get("method") or "GET").upper()
+                    p = ((e or {}).get("path") or "").strip()
+                    if p:
+                        eps.append({"method": m, "path": p})
+            return eps
+
+        def _normalize_base(c: dict, default: str) -> str:
+            b = (c or {}).get("base_url") or default
+            b = b if isinstance(b, str) else default
+            if not b.startswith("/"):
+                b = "/" + b
+            return b
+
+        eps = _contract_endpoints(contract or {})
+        base_url = _normalize_base(contract or {}, "/api")
 
         # Presets para backend
         if preset == "flask":
@@ -1005,21 +1147,119 @@ f'- POST http://127.0.0.1:{api_port}/api/tasks Body: {{"task":"Nova tarefa"}}\n'
                 "backend/app/__init__.py",
                 """from flask import Flask, Blueprint\nfrom flask_cors import CORS\nimport pkgutil, importlib\n\napp = Flask(__name__)\nCORS(app)\n\n@app.get('/health')\ndef _health():\n    return {"status": "ok"}\n\n# Registra explicitamente o Blueprint 'main' e depois faz auto-discovery\ndef _register_blueprints():\n    # Registro explícito do 'main' se existir\n    try:\n        from .main import main as main_bp\n        if 'main' not in app.blueprints:\n            app.register_blueprint(main_bp)\n    except Exception as e:\n        print(f"[app] Falha ao registrar blueprint 'main': {e}")\n\n    # Auto-discovery de Blueprints em backend/app/*\n    try:\n        for _, modname, _ in pkgutil.iter_modules(__path__):\n            try:\n                m = importlib.import_module(f"{__name__}.{modname}")\n                for attr_name in dir(m):\n                    obj = getattr(m, attr_name)\n                    if isinstance(obj, Blueprint) and obj.name not in app.blueprints:\n                        app.register_blueprint(obj)\n            except Exception as e:\n                print(f"[app] Ignorando módulo {modname}: {e}")\n    except Exception as e:\n        print(f"[app] Falha ao varrer blueprints: {e}")\n\n    print(f"[app] Blueprints registrados: {list(app.blueprints.keys())}")\n\n_register_blueprints()\n"""
             )
-            # Só escreve main.py mínimo se não houver bloco no README apontando para backend/app/main.py
             if not re.search(r"backend/app/main\.py", back or "", re.IGNORECASE):
-                zf.writestr(
-                    "backend/app/main.py",
-                    """from flask import Blueprint, jsonify, request, abort\n\n# Blueprint principal com prefixo /api\nmain = Blueprint('main', __name__, url_prefix='/api')\n\n# Estado em memória (apenas para demo)\ntasks = []\ntask_id_counter = 1\n\n@main.route('/tasks', methods=['GET'])\ndef get_tasks():\n    return jsonify({ 'tasks': tasks })\n\n@main.route('/tasks', methods=['POST'])\ndef create_task():\n    global task_id_counter\n    data = request.get_json()\n    if not data or 'task' not in data:\n        abort(400, description='Invalid input')\n    task = { 'id': task_id_counter, 'task': data['task'] }\n    tasks.append(task)\n    task_id_counter += 1\n    return jsonify(task), 201\n\n# TODO: mover rotas adicionais aqui\n"""
-                )
+                if eps:
+                    lines = []
+                    lines.append("from flask import Blueprint, jsonify, request")
+                    lines.append(f"main = Blueprint('main', __name__, url_prefix='{base_url}')")
+                    for e in eps:
+                        p = e.get("path") or ""
+                        m = e.get("method") or "GET"
+                        rel = p
+                        if p.startswith(base_url):
+                            rel = p[len(base_url):] or "/"
+                        if not rel.startswith("/"):
+                            rel = "/" + rel
+                        func = f"ep_{m.lower()}_{re.sub(r'[^a-z0-9]+','_', rel.strip('/')).strip('_') or 'root'}"
+                        lines.append(f"@main.route('{rel}', methods=['{m}'])")
+                        lines.append(f"def {func}():")
+                        lines.append("    return jsonify({'ok': True})")
+                    zf.writestr("backend/app/main.py", "\n".join(lines))
+                else:
+                    zf.writestr(
+                        "backend/app/main.py",
+                        "from flask import Blueprint, jsonify\nmain = Blueprint('main', __name__, url_prefix='/api')\n@main.route('/tasks', methods=['GET'])\ndef get_tasks():\n    return jsonify({'tasks': []})\n"
+                    )
         elif preset == "express":
             pkg = """{\n  \"name\": \"{name}\",\n  \"version\": \"0.1.0\",\n  \"private\": true,\n  \"scripts\": {\n    \"start\": \"node src/index.js\"\n  },\n  \"dependencies\": {\n    \"express\": \"^4.18.2\",\n    \"cors\": \"^2.8.5\"\n  }\n}\n""".replace("{name}", project_name)
             zf.writestr("backend/package.json", pkg)
-            # Express CRUD gerado dinamicamente conforme a entidade solicitada
-            try:
-                resource = _infer_resource(task or "", front, back, qa)
-            except Exception:
-                resource = "users"
-            zf.writestr("backend/src/index.js", _build_express_crud(resource))
+            # Tenta usar código de servidor do back como base
+            base_server_js: str | None = None
+            back_blocks_try = _extract_code_blocks(back)
+            for b in back_blocks_try:
+                fn = (b.get("filename") or "").lower()
+                lang = (b.get("language") or "").lower()
+                content = b.get("content") or ""
+                if lang in ("javascript", "js") and ("express" in content.lower()):
+                    if (not fn) or any(fn.endswith(x) for x in ("index.js", "server.js", "app.js", "main.js")):
+                        base_server_js = _sanitize_express_js(content)
+                        break
+            if base_server_js:
+                js = base_server_js
+                # Garante middleware básico
+                if "app.use(express.json())" not in js:
+                    js += "\napp.use(express.json())\n"
+                if "const cors" not in js and "app.use(cors())" not in js:
+                    js = "const cors = require('cors')\n" + js + "\napp.use(cors())\napp.options('*', cors())\n"
+                # Health
+                if "/health" not in js:
+                    js += "\napp.get('/health', (req,res)=>res.json({status:'ok'}))\n"
+                # Injeta endpoints do contrato que faltarem
+                has_tasks_state = ("let tasks =" in js) or ("const tasks =" in js)
+                if not has_tasks_state and any((e.get('path') or '').endswith('/tasks') for e in eps):
+                    js += "\nlet tasks = [];\nlet currentId = 1;\n"
+                for e in eps:
+                    m = (e.get('method') or 'GET').lower()
+                    p = e.get('path') or ''
+                    # normaliza caminho e aplica base_url se não presente
+                    path = p if p.startswith('/') else '/' + p
+                    if base_url and not path.startswith(base_url):
+                        path_full = base_url + (path if path != '/' else '')
+                    else:
+                        path_full = path
+                    signature = f"app.{m}('{path_full}'"
+                    if signature in js:
+                        continue
+                    if path_full.endswith('/tasks'):
+                        if m == 'get':
+                            js += "\napp.get('/api/tasks', (req,res)=>res.json(tasks))\n"
+                        elif m == 'post':
+                            js += "\napp.post('/api/tasks', (req,res)=>{ const { name } = req.body || {}; if(!name) return res.status(400).json({ error: 'Nome da tarefa é obrigatório' }); const t = { id: currentId++, name }; tasks.push(t); res.status(201).json(t); })\n"
+                        else:
+                            js += f"\napp.{m}('{path_full}', (req,res)=>res.json({{ ok: true }}))\n"
+                    elif path_full.endswith('/tasks/:id'):
+                        if m == 'put':
+                            js += "\napp.put('/api/tasks/:id', (req,res)=>{ const { id } = req.params; const { name } = req.body || {}; const t = tasks.find(x=>String(x.id)===String(id)); if(!t) return res.status(404).json({ error: 'Tarefa não encontrada' }); t.name = name ?? t.name; res.json(t); })\n"
+                        elif m == 'delete':
+                            js += "\napp.delete('/api/tasks/:id', (req,res)=>{ const { id } = req.params; const i = tasks.findIndex(x=>String(x.id)===String(id)); if(i<0) return res.status(404).json({ error: 'Tarefa não encontrada' }); tasks.splice(i,1); res.status(204).end(); })\n"
+                        else:
+                            js += f"\napp.{m}('{path_full}', (req,res)=>res.json({{ ok: true }}))\n"
+                    else:
+                        js += f"\napp.{m}('{path_full}', (req,res)=>res.json({{ ok: true }}))\n"
+                # Garante listen
+                if "app.listen(" not in js:
+                    if "process.env.PORT" not in js and "const PORT" not in js:
+                        js = "const PORT = process.env.PORT || 3000\n" + js
+                    js += "\napp.listen(process.env.PORT || PORT || 3000, ()=>console.log('Server on ' + (process.env.PORT || PORT || 3000)))\n"
+                zf.writestr("backend/src/index.js", js)
+            else:
+                if eps:
+                    parts = []
+                    parts.append("const express = require('express')")
+                    parts.append("const cors = require('cors')")
+                    parts.append("const app = express()")
+                    parts.append("const PORT = process.env.PORT || 3000")
+                    parts.append("app.use(cors())")
+                    parts.append("app.options('*', cors())")
+                    parts.append("app.use(express.json())")
+                    parts.append("app.get('/health', (req,res)=>res.json({status:'ok'}))")
+                    for e in eps:
+                        m = (e.get('method') or 'GET').lower()
+                        p = e.get('path') or ''
+                        path = p if p.startswith('/') else '/' + p
+                        if base_url and not path.startswith(base_url):
+                            path_full = base_url + (path if path != '/' else '')
+                        else:
+                            path_full = path
+                        parts.append(f"app.{m}('{path_full}', (req,res)=>res.json({{ ok: true }}))")
+                    parts.append("app.listen(PORT, ()=>console.log('Server on ' + PORT))")
+                    zf.writestr("backend/src/index.js", "\n".join(parts))
+                else:
+                    try:
+                        resource = _infer_resource(task or "", front, back, qa)
+                    except Exception:
+                        resource = "users"
+                    zf.writestr("backend/src/index.js", _build_express_crud(resource))
         elif preset == "spring":
             pom = f"""
 <project xmlns=\"http://maven.apache.org/POM/4.0.0\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd\">
@@ -1105,20 +1345,53 @@ spring:
     console:
       enabled: true
 """)
-            # HealthController mínimo com CORS para facilitar teste rápido
             ctrl_pkg_path = group_id.replace('.', '/') + "/controller"
-            ctrl_src = (
-                f"package {group_id}.controller;\n"
-                "import org.springframework.web.bind.annotation.*;\n"
-                "import java.util.Map;\n"
-                "@RestController\n"
-                "@CrossOrigin(origins = \"*\")\n"
-                "public class HealthController {\n"
-                "  @GetMapping(\"/health\")\n"
-                "  public Map<String,String> health(){ return Map.of(\"status\", \"ok\"); }\n"
-                "}\n"
-            )
-            zf.writestr(f"backend/src/main/java/{ctrl_pkg_path}/HealthController.java", ctrl_src)
+            if eps:
+                base = base_url
+                cls = "ApiController"
+                lines = []
+                lines.append(f"package {group_id}.controller;")
+                lines.append("import org.springframework.web.bind.annotation.*;")
+                lines.append("import java.util.Map;")
+                lines.append("@RestController")
+                lines.append("@CrossOrigin(origins = \"*\")")
+                lines.append(f"@RequestMapping(\"{base}\")")
+                lines.append(f"public class {cls} {{")
+                for e in eps:
+                    m = (e.get('method') or 'GET').upper()
+                    p = e.get('path') or ''
+                    rel = p
+                    if p.startswith(base):
+                        rel = p[len(base):] or "/"
+                    if not rel.startswith("/"):
+                        rel = "/" + rel
+                    if m == "GET":
+                        ann = "GetMapping"
+                    elif m == "POST":
+                        ann = "PostMapping"
+                    elif m == "PUT":
+                        ann = "PutMapping"
+                    elif m == "DELETE":
+                        ann = "DeleteMapping"
+                    else:
+                        ann = "RequestMapping"
+                    lines.append(f"  @{ann}(\"{rel}\")")
+                    lines.append(f"  public Map<String,Object> ep_{m.lower()}_{re.sub(r'[^a-z0-9]+','_', rel.strip('/')).strip('_') or 'root'}() {{ return Map.of(\"ok\", true); }}")
+                lines.append("}")
+                zf.writestr(f"backend/src/main/java/{ctrl_pkg_path}/{cls}.java", "\n".join(lines))
+            else:
+                ctrl_src = (
+                    f"package {group_id}.controller;\n"
+                    "import org.springframework.web.bind.annotation.*;\n"
+                    "import java.util.Map;\n"
+                    "@RestController\n"
+                    "@CrossOrigin(origins = \"*\")\n"
+                    "public class HealthController {\n"
+                    "  @GetMapping(\"/health\")\n"
+                    "  public Map<String,String> health(){ return Map.of(\"status\", \"ok\"); }\n"
+                    "}\n"
+                )
+                zf.writestr(f"backend/src/main/java/{ctrl_pkg_path}/HealthController.java", ctrl_src)
             # Configuração global de CORS para todos os endpoints
             cors_pkg_path = group_id.replace('.', '/') + "/config"
             cors_src = (
@@ -1253,7 +1526,7 @@ spring:
                     sanitized = _sanitize_express_js(content)
                     base_lower = (name or "").lower()
                     # Evita criar arquivos duplicados do servidor Express. Todas as rotas ficam em index.js.
-                    if base_lower in ("app.js", "server.js", "index.js"):
+                    if any(base_lower.endswith(x) for x in ("app.js", "server.js", "index.js", "main.js")):
                         # Não escreve arquivos separados; o scaffold de index.js já concentra as rotas.
                         pass
                     else:

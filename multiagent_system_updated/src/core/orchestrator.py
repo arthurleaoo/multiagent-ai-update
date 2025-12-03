@@ -6,6 +6,13 @@ from datetime import datetime
 from src.agents.front_agent import FrontAgent
 from src.agents.back_agent import BackAgent
 from src.agents.qa_agent import QAAgent
+from src.core.validation import (
+    validate_contract_minimal,
+    check_front_vs_contract,
+    infer_contract_from_backend,
+    try_load_contract_from_blocks,
+)
+from src.core.packager import _extract_code_blocks
 
 DB_PATH = os.getenv("DATABASE_PATH", "./data/history.db")
 
@@ -231,11 +238,40 @@ class Orchestrator:
             conn.close()
         
         print(f"\n✅ ORQUESTRADOR: Tarefa '{task}' finalizada com sucesso. Retornando resposta ao cliente.") # NOVO
+        # 🔎 Validação de contrato e integração front/back
+        back_blocks = _extract_code_blocks(back_out or "")
+        qa_blocks = _extract_code_blocks(qa_out or "")
+        contract = try_load_contract_from_blocks(back_blocks) or try_load_contract_from_blocks(qa_blocks)
+        if not contract:
+            contract = infer_contract_from_backend(back_out or "")
+        ok_contract, err_contract = validate_contract_minimal(contract or {})
+
+        # Monta mapa de arquivos do frontend para inspeção
+        front_blocks = _extract_code_blocks(front_out or "")
+        front_files: dict[str, str] = {}
+        for b in front_blocks:
+            lang = (b.get("language") or "").lower()
+            fn = b.get("filename") or ""
+            content = b.get("content") or ""
+            if lang in ("javascript", "js", "typescript", "ts"):
+                path = fn or ("frontend/script.js" if lang in ("javascript", "js") else "frontend/script.ts")
+                front_files[path] = content
+        if not front_files and (front_out or "").strip():
+            front_files["frontend/script.js"] = front_out
+
+        ok_integration, err_integration = check_front_vs_contract(front_files, contract or {})
 
         return {
             "task": task,
             "language": language,
             "front": front_out,
             "back": back_out,
-            "qa": qa_out
+            "qa": qa_out,
+            "contract": contract,
+            "validation": {
+                "contract_ok": ok_contract,
+                "contract_error": err_contract,
+                "integration_ok": ok_integration,
+                "integration_error": err_integration,
+            },
         }

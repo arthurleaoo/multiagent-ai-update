@@ -280,6 +280,17 @@ def generate():
 
     try:
         result = get_orch().run_all(task, language, agents_to_run, user_id=uid)
+
+        # Gating: só gera ZIP se contrato e integração estiverem OK
+        validation = result.get("validation") or {}
+        contract_ok = bool(validation.get("contract_ok", True))
+        integration_ok = bool(validation.get("integration_ok", True))
+        if not contract_ok or not integration_ok:
+            return jsonify({
+                "error": "Falha na validação de contrato/integracao",
+                "validation": validation,
+                "contract": result.get("contract"),
+            }), 422
         return jsonify(result), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -345,7 +356,8 @@ def generate_zip():
                 qa=result.get("qa", ""),
                 preset=preset,
                 project_name=project_name,
-                group_id=group_id
+                group_id=group_id,
+                contract=result.get("contract")
             )
         else:
             memzip = build_project_zip(
