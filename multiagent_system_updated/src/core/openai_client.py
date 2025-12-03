@@ -13,10 +13,10 @@ class OpenAIClient:
         self.client = OpenAI(api_key=api_key)
         self.model = model
 
-    def ask(self, system: str, user: str, max_tokens: int = 1500, temperature: float = 0.2) -> str:
+    def ask(self, system: str, user: str, max_tokens: int = 3500, temperature: float = 0.1) -> str:
         """
         Envia uma mensagem para a API da OpenAI (nova interface >= 1.0.0)
-        com timeout estendido (120s).
+        com timeout estendido (180s) e maior limite de saída por padrão.
         """
         response = self.client.chat.completions.create(
             model=self.model,
@@ -26,7 +26,7 @@ class OpenAIClient:
             ],
             max_completion_tokens=max_tokens,
             temperature=temperature,
-            timeout=120  # Aumenta o limite para 2 minutos
+            timeout=180  # Aumenta o limite para 3 minutos
         )
 
         return response.choices[0].message.content.strip()

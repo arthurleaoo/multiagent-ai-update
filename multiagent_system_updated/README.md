@@ -7,6 +7,7 @@ Projeto multiagente em Python (Front / Back / QA) que aceita a linguagem desejad
 - Persistência em SQLite (history)
 - Prompts otimizados e consistentes
 - Código pronto para rodar localmente
+- Autenticação de usuário (registro, login, perfil) e proteção do `/generate`
 
 ## Como rodar
 1. Copie `.env.example` para `.env` e adicione sua OPENAI_API_KEY.
@@ -20,3 +21,83 @@ Projeto multiagente em Python (Front / Back / QA) que aceita a linguagem desejad
      "task": "Crie uma tela de login com validação de email e senha.",
      "language": "Node.js"
    }
+
+## Autenticação
+
+### Variáveis de ambiente
+- `SECRET_KEY`: chave de assinatura dos tokens (obrigatória em produção). Caso ausente, uma chave efêmera é gerada em dev.
+- `TOKEN_MAX_AGE` (opcional): tempo de validade do token em segundos (padrão 604800 = 7 dias).
+- `PASSWORD_PEPPER` (opcional, recomendado em produção): segredo adicional concatenado às senhas antes de hashear (reforça contra vazamentos de hash).
+- `LOGIN_LOCK_THRESHOLD` (padrão 5): número de tentativas de login falhas antes de bloquear temporariamente.
+- `LOGIN_LOCK_WINDOW_MINUTES` (padrão 15): janela em minutos para contar tentativas.
+- `LOGIN_LOCK_DURATION_MINUTES` (padrão 15): tempo de bloqueio após exceder o limite.
+
+### Registro
+POST `http://127.0.0.1:5000/auth/register`
+Body JSON:
+```
+{
+  "email": "user@example.com",
+  "password": "minha_senha_segura"
+}
+```
+Resposta (201):
+```
+{
+  "id": 1,
+  "email": "user@example.com"
+}
+```
+
+### Login
+POST `http://127.0.0.1:5000/auth/login`
+Body JSON:
+```
+{
+  "email": "user@example.com",
+  "password": "minha_senha_segura"
+}
+```
+Resposta (200):
+```
+{
+  "id": 1,
+  "email": "user@example.com",
+  "token": "<Bearer Token>"
+}
+```
+
+Observações de segurança:
+- Política de senha: mínimo 8 caracteres, 1 maiúscula, 1 minúscula, 1 dígito e 1 especial.
+- Rate limiting: após múltiplas falhas em curta janela, a conta fica temporariamente bloqueada (429) e é desbloqueada automaticamente depois do período configurado.
+- Pepper opcional: definir `PASSWORD_PEPPER` em produção aumenta a resiliência contra ataques a hashes.
+
+### Perfil
+GET `http://127.0.0.1:5000/auth/me`
+Header: `Authorization: Bearer <token>`
+Ou via query string (compatibilidade): `?authorization=Bearer <token>` ou `?token=<token>`
+Resposta (200):
+```
+{
+  "id": 1,
+  "email": "user@example.com",
+  "created_at": "2025-01-01T00:00:00"
+}
+```
+
+### Uso do `/generate` autenticado
+POST `http://127.0.0.1:5000/generate`
+Headers:
+- `Authorization: Bearer <token>`
+Ou via query string (compatibilidade): `?authorization=Bearer <token>` ou `?token=<token>`
+Body JSON:
+```
+{
+  "task": "Crie uma tela de login...",
+  "language": "Python",
+  "agents": ["front", "back", "qa"]
+}
+```
+Observações:
+- Sem o header `Authorization`, o endpoint retorna `401 Não autenticado`.
+- As execuções geradas passam a ser associadas ao `user_id` quando disponível.
